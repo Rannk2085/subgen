@@ -20,29 +20,38 @@ class Preset(NamedTuple):
     notes: list[str]   # 适用场景或注意事项
 
 
-# ACL4SSR 仓库的 raw URL 前缀
-_BASE = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config"
+# ACL4SSR ini 的 CDN 前缀
+# 注意: 不能直接用 raw.githubusercontent.com，国内防火墙下 subconverter 拉不到
+# (subconverter 自己用 libcurl 直连，没有 fallback，拉不到就用内置默认 13 组)
+# jsdelivr 是 GitHub 官方支持的 CDN，国内直连可达
+_BASE = "https://gcore.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/config"
 
 
 PRESETS: list[Preset] = [
     Preset(
         id="Full",
         name="ACL4SSR Full 完整版",
-        description="19 个策略组，~10000 规则。最全功能，覆盖所有主流分流场景",
+        description="29 个策略组，~10000 规则。最全功能，覆盖所有主流分流场景",
+        # 实测从 ACL4SSR_Online_Full.ini 拉到的真实组列表（v0.2.8 起准确）
         groups=[
-            "🚀 节点选择", "♻️ 自动选择",
-            "🌍 国外媒体", "🌏 国内媒体", "📲 电报信息",
-            "Ⓜ️ 微软Azure", "Ⓜ️ 微软服务", "🍎 苹果服务", "📢 谷歌FCM",
-            "🛑 全球拦截", "🍃 应用净化", "🎯 全球直连", "🐟 漏网之鱼",
-            "🇭🇰 香港节点", "🇯🇵 日本节点", "🇺🇸 美国节点",
-            "🇸🇬 狮城节点", "🇨🇳 台湾节点", "🌍 其它地区",
+            "🚀 节点选择", "🚀 手动切换", "♻️ 自动选择",
+            "📲 电报消息", "💬 Ai平台",
+            "📹 油管视频", "🎥 奈飞视频", "📺 巴哈姆特", "📺 哔哩哔哩",
+            "🌍 国外媒体", "🌏 国内媒体",
+            "📢 谷歌FCM", "Ⓜ️ 微软Bing", "Ⓜ️ 微软云盘", "Ⓜ️ 微软服务",
+            "🍎 苹果服务", "🎮 游戏平台", "🎶 网易音乐",
+            "🎯 全球直连", "🛑 广告拦截", "🍃 应用净化", "🐟 漏网之鱼",
+            "🇭🇰 香港节点", "🇯🇵 日本节点", "🇺🇲 美国节点",
+            "🇨🇳 台湾节点", "🇸🇬 狮城节点", "🇰🇷 韩国节点",
+            "🎥 奈飞节点",
         ],
         rules_estimate=10000,
         ini_url=f"{_BASE}/ACL4SSR_Online_Full.ini",
         recommended=True,
         notes=[
             "默认推荐，适合 90% 用户",
-            "策略组按地区+服务双维度分组",
+            "策略组按地区+服务+视频平台三维度分组",
+            "包含 AI 平台、奈飞、油管、B站、巴哈、网易云、游戏平台等专门组",
         ],
     ),
 
