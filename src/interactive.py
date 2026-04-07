@@ -130,6 +130,53 @@ def step_network_info() -> None:
     prompt_continue()
 
 
+def step_fetch_subscription(url: str) -> "subconv.FetchResult":
+    """
+    本步骤紧跟网络检测：在用户已经看过当前网络状态的语境下，立即拉订阅。
+    失败时进入 r/q 循环，让用户切换网络后重试或退出。
+
+    为什么单独成步：拉订阅和拉 ini 可能要走不同的网络
+    （比如订阅域名要国内 IP，ini 走 CDN 直连），分两次让用户有机会切网络。
+    """
+    print()
+    print(C.bold("  ── 准备拉取订阅 ──"))
+    print(C.dim("  接下来 subgen 会用 ClashMeta UA 直连拉取订阅 URL。"))
+    print(C.dim("  · 如果你的订阅要求特定地区 IP（国内机场常见），"))
+    print(C.dim("    请先在 Clash Party 里切到对应地区节点 / 启用 TUN"))
+    print(C.dim("  · 如果订阅需要直连出国，请关掉 TUN / 系统代理"))
+    print(C.dim("  · 拉订阅和拉 ini 是两次独立请求，可分别切换网络"))
+    print()
+    prompt_continue("调好网络后按回车开始拉订阅...")
+
+    while True:
+        print(C.info("  拉订阅..."))
+        fetch_result = subconv.fetch_subscription(url)
+        if fetch_result.success:
+            print(C.ok(f"  成功 ({fetch_result.size} bytes)"))
+            if fetch_result.upstream_filename:
+                print(C.dim(f"  机场原名: {fetch_result.upstream_filename}"))
+            return fetch_result
+
+        print(C.fail(f"  失败: {fetch_result.error}"))
+        print()
+        print(C.dim("  常见原因:"))
+        print(C.dim("    · 订阅域名被墙 / 当前节点被机场封锁"))
+        print(C.dim("    · 切换 Clash Party 的 TUN / 节点后再重试"))
+        print()
+        try:
+            choice = input("  选择 [r=重试 / q=退出]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise SystemExit(130)
+        if choice in ("", "r", "retry"):
+            print(C.info("  重试..."))
+            continue
+        if choice in ("q", "quit", "exit"):
+            print(C.dim("  已取消"))
+            raise SystemExit(130)
+        print(C.fail("  无效输入，请输 r / q"))
+
+
 def step_preset(default_id: str = "Full") -> tuple[str, str]:
     """规则套餐选择。返回 (preset_id, ini_url)"""
     print()
@@ -153,16 +200,10 @@ def step_preset(default_id: str = "Full") -> tuple[str, str]:
     preset = find_preset(preset_id)
     assert preset is not None
 
-    # 显示该套餐的策略组明细
+    # 不再展示该套餐的策略组明细 —— 真实的策略组以 ini 文件为准，
+    # 等下一步预检 ini 拉到后由 subconverter 决定，预先展示反而可能不一致。
     print()
     print(C.bold(f"  ── {preset.name} ──"))
-    if preset.groups:
-        print(f"  {C.dim('策略组 (' + str(len(preset.groups)) + ' 个):')}")
-        # 不用 ljust 对齐 —— Python len() 对国旗 emoji / 中文宽字符计数不准，
-        # 会导致显示错位甚至吃字符。改用 ' · ' 分隔，3 个一行，简单可靠。
-        for i in range(0, len(preset.groups), 3):
-            chunk = preset.groups[i:i + 3]
-            print("      " + "  ·  ".join(chunk))
     if preset.notes:
         print(f"  {C.dim('说明:')}")
         for n in preset.notes:
@@ -221,6 +262,31 @@ def show_confirm(url: str, preset_id: str, target: str) -> bool:
     return prompt_yesno("  确认生成转换 URL？", default=True)
 
 
+def step_check_ini(ini_url: str) -> str:
+    """
+    本步骤紧跟套餐选择：用户刚选完规则套餐，立刻预检 ini URL 可达性。
+    与拉订阅分开是因为两者可能需要不同的网络（订阅常要国内 IP，
+    ini 走 jsdelivr CDN 通常直连即可）。
+    返回 effective_ini_url，"" 表示用 subconverter 内置 fallback。
+    """
+    if not ini_url:
+        print()
+        print(C.dim("  (无 ini URL，使用 subconverter 内置默认 13 组)"))
+        return ""
+
+    print()
+    print(C.bold("  ── 准备拉取规则配置 ini ──"))
+    print(C.dim("  即将预检以下 ini URL 是否可达："))
+    print(C.dim(f"    {ini_url}"))
+    print(C.dim("  · 此 URL 走 jsdelivr CDN，国内多数情况直连可达"))
+    print(C.dim("  · 如果刚才为了拉订阅改了网络，现在可视情况切回直连"))
+    print(C.dim("  · 拉不到 ini 时可选 fallback（subconverter 内置 13 组）"))
+    print()
+    prompt_continue("调好网络后按回车开始预检 ini...")
+
+    return _check_ini_with_retry(ini_url)
+
+
 def _check_ini_with_retry(ini_url: str) -> str:
     """
     预检 ini 可达性，失败时进入 r/f/q 循环。
@@ -263,48 +329,35 @@ def _check_ini_with_retry(ini_url: str) -> str:
         print(C.fail("  无效输入，请输 r / f / q"))
 
 
-def do_generate(url: str, preset_id: str, target: str) -> int:
+def do_generate(
+    url: str,
+    preset_id: str,
+    target: str,
+    fetch_result: "subconv.FetchResult",
+    effective_ini_url: str,
+    final_filename: str,
+) -> int:
     """
     执行转换，返回 exit code。
 
-    关键时序设计（解决「Clash 导入时 127.0.0.1 拒绝连接」问题）：
-      1. subgen 拉订阅内容
-      2. 预检 ini URL 可达性（不可达时让用户选 r/f/q）
-      3. 起本地 HTTP 服务器（with 块开始）
-      4. 调 subconverter 完成转换 + 打印 URL
-      5. 等用户回车 ←── 本地 HTTP 服务器和 subconverter 在此期间都活着
-      6. with 块退出，本地 HTTP 服务器关闭
-      7. cli.py 主流程退出，subconverter 被杀
+    订阅内容和 ini 可达性都已经在向导阶段拉好/检过了
+    （订阅在网络步骤后立刻拉，ini 在选完套餐后立刻检），
+    本函数只负责：起本地 HTTP 服务器 + 调 subconverter + 等用户按回车。
+
+    关键时序（解决「Clash 导入时 127.0.0.1 拒绝连接」问题）：
+      1. 起本地 HTTP 服务器（with 块开始，喂之前已拉好的订阅 content）
+      2. 调 subconverter 完成转换 + 打印 URL
+      3. 等用户回车 ←── 本地 HTTP 服务器和 subconverter 在此期间都活着
+      4. with 块退出，本地 HTTP 服务器关闭
+      5. cli.py 主流程退出，subconverter 被杀
     """
     preset = find_preset(preset_id)
     if preset is None:
         print(C.fail(f"未知的预设 ID: {preset_id}"))
         return 1
 
-    # ─── 步骤 1/3: 拉订阅 ───
     print()
-    print(C.info("步骤 1/3: 拉订阅..."))
-    fetch_result = subconv.fetch_subscription(url)
-    if not fetch_result.success:
-        print(C.fail(f"  失败: {fetch_result.error}"))
-        return 2
-    print(C.ok(f"  成功 ({fetch_result.size} bytes)"))
-
-    final_filename = subconv.compute_filename(fetch_result, url)
-
-    # ─── 步骤 2/3: 预检 ini 可达性 ───
-    print()
-    print(C.info("步骤 2/3: 预检规则配置 ini 可达性..."))
-    if preset.ini_url:
-        effective_ini_url = _check_ini_with_retry(preset.ini_url)
-    else:
-        # 自定义预设可能没 ini_url
-        effective_ini_url = ""
-        print(C.dim("  (无 ini URL，使用 subconverter 内置默认)"))
-
-    # ─── 步骤 3/3: 起本地服务器 + 调 subconverter ───
-    print()
-    print(C.info("步骤 3/3: 调本地 subconverter 转换..."))
+    print(C.info("调用本地 subconverter 转换..."))
 
     # 关键：本地 HTTP 服务器必须在 with 块内一直存活，
     # 直到用户按回车（=Clash 已拉完订阅）才关闭
@@ -369,14 +422,25 @@ def run_wizard(initial_url: str = "") -> int:
     print(C.dim("    · 菜单选择: 输入数字 + 回车"))
     print(C.dim("    · 走默认值: 直接按回车（标 ▸ 的那项）"))
     print(C.dim("    · 取消退出: Ctrl+C"))
+    print(C.dim("  本工具会分两次拉网络资源（订阅 / ini），可分别切换网络"))
 
+    # ── [1/4] URL ──
     url = initial_url or step_url()
+
+    # ── [2/4] 网络状态 → 立即拉订阅（紧跟网络检测，方便用户先调好网络）──
     step_network_info()
+    fetch_result = step_fetch_subscription(url)
+    final_filename = subconv.compute_filename(fetch_result, url)
+
+    # ── [3/4] 套餐选择 → 立即预检 ini（订阅和 ini 可能要不同网络）──
     preset_id, ini_url = step_preset(default_id=default_preset)
+    effective_ini_url = step_check_ini(ini_url)
+
+    # ── [4/4] 目标客户端 ──
     target = step_target(default=default_target)
 
     if not show_confirm(url, preset_id, target):
         print(C.warn("已取消"))
         return 130
 
-    return do_generate(url, preset_id, target)
+    return do_generate(url, preset_id, target, fetch_result, effective_ini_url, final_filename)
