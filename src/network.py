@@ -34,36 +34,29 @@ def check_port(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
-def fetch_outgoing_ip(timeout: float = 5.0) -> tuple[str, str]:
+def fetch_outgoing_ip(timeout: float = 2.0) -> tuple[str, str]:
     """
     获取直连出口 IP 和地域。
     始终强制直连（空 ProxyHandler），不受 HTTP_PROXY 环境变量影响。
     返回 (ip, region)。失败返回 ("", "")。
+
+    速度优化：单个 endpoint，超时 2 秒，最坏 2 秒就退出（不再 3 个 × 5 秒 = 15 秒）
     """
-    candidates = [
-        "https://api.myip.com",          # {ip, country, cc}
-        "https://ipinfo.io/json",        # {ip, country, region, city}
-        "https://api.ip.sb/geoip",       # {ip, country, ...}
-    ]
+    # 只用一个最快最稳的 endpoint
+    url = "https://api.myip.com"
 
     # 强制直连：空 ProxyHandler 会覆盖默认从环境变量读 proxy 的行为
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    for url in candidates:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "subgen/0.1 (curl-like)"})
-            with opener.open(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
-                ip = data.get("ip", "")
-                # 不同服务字段不同
-                country = data.get("country", "") or data.get("country_code", "") or data.get("cc", "")
-                region = _normalize_region(country)
-                if ip:
-                    return ip, region
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError, socket.timeout):
-            continue
-
-    return "", ""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "subgen/0.2"})
+        with opener.open(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            ip = data.get("ip", "")
+            country = data.get("country", "") or data.get("cc", "")
+            return ip, _normalize_region(country)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError, socket.timeout):
+        return "", ""
 
 
 def _normalize_region(country: str) -> str:
@@ -97,8 +90,8 @@ def detect_env() -> NetSnapshot:
     clash_port = 7890
     clash_open = check_port("127.0.0.1", clash_port, timeout=0.5)
 
-    # 3. 直连出口 IP（强制不走代理）
-    direct_ip, direct_region = fetch_outgoing_ip(timeout=5.0)
+    # 3. 直连出口 IP（强制不走代理，2 秒超时）
+    direct_ip, direct_region = fetch_outgoing_ip(timeout=2.0)
 
     return NetSnapshot(
         sys_proxy_env=sys_proxy,

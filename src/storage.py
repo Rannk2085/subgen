@@ -107,8 +107,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "general": {
         # 默认规则套餐 ID（参考 src/presets_data.py 里的 PRESETS）
         "default_preset_id": "Full",
-        # 默认目标客户端
-        "default_target": "clashmeta",
+        # 默认目标客户端（注意 subconverter 没有 'clashmeta' target，
+        # Clash 全家共用 'clash'，输出的 YAML 兼容 Clash.Meta / Mihomo / Clash Party）
+        "default_target": "clash",
     },
     "subconverter": {
         "port": 25500,

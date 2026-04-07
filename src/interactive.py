@@ -179,19 +179,21 @@ def step_preset(default_id: str = "Full") -> tuple[str, str]:
     return preset_id, ini_url
 
 
-def step_target(default: str = "clashmeta") -> str:
-    """目标客户端菜单，返回 target string"""
+def step_target(default: str = "clash") -> str:
+    """目标客户端菜单，返回 subconverter 的 target 字符串
+
+    注意：subconverter 没有 'clashmeta' 这个 target，Clash / Clash.Meta / Mihomo /
+    Clash Party 都共用 'clash' target 输出的 YAML（格式兼容）
+    """
     print()
     print(C.bold("[4/4] 目标客户端"))
     options = [
-        ("clash",     "Clash / Clash for Windows"),
-        ("clashmeta", "Clash.Meta / Mihomo / Clash Party / Mihomo Party  ⭐"),
-        ("surge",     "Surge"),
-        ("quanx",     "Quantumult X"),
-        ("loon",      "Loon"),
-        ("singbox",   "sing-box"),
+        ("clash", "Clash 系（Clash / Clash.Meta / Mihomo / Clash Party / Mihomo Party）⭐"),
+        ("surge", "Surge"),
+        ("quanx", "Quantumult X"),
+        ("loon",  "Loon"),
     ]
-    default_idx = 1  # clashmeta
+    default_idx = 0  # clash
     for i, (val, _) in enumerate(options):
         if val == default:
             default_idx = i
@@ -204,17 +206,14 @@ def step_target(default: str = "clashmeta") -> str:
 # =================================================================
 
 def show_confirm(url: str, preset_id: str, target: str) -> bool:
-    """确认页。subscription URL/preset/target/导入后命名 都显示出来"""
+    """确认页。只展示 URL / 套餐 / 目标客户端，不预测命名（命名拉取后才知道）"""
     preset = find_preset(preset_id)
-    derived_name = subconv.derive_name_from_url(url)
-    final_filename = subconv.make_filename(derived_name)
 
     print()
     print(C.bold("=== 请确认 ==="))
     print(f"  订阅 URL    : {url[:60]}{'...' if len(url) > 60 else ''}")
     print(f"  规则套餐    : {preset.name if preset else preset_id}")
     print(f"  目标客户端  : {target}")
-    print(f"  导入后命名  : {C.CYAN}{final_filename}{C.RESET}  {C.dim('← Clash 导入时显示的配置名')}")
     print(C.bold("============="))
     print()
     return prompt_yesno("  确认生成转换 URL？", default=True)
