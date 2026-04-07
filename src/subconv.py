@@ -1,16 +1,13 @@
 """
-核心：调本地 subconverter 把订阅 URL 转成 Clash 配置
+核心：拉订阅 → 起本地 HTTP 服务器 → 让 subconverter 从本地 socket 拉 → 转换
 
-设计：
-- subgen **不再** 用 data: URI 编码订阅内容（会撞 subconverter HTTP URL 长度上限 → 414）
-- 直接把原始订阅 URL 传给 subconverter，由它自己拉
-- subgen 和 subconverter 在同一台机器上跑，出口 IP 完全一致，效果一样
-- subconverter 默认 proxy_subscription = NONE，跟 subgen 的「始终直连」策略一致
-
-subgen 仍然要做一次 HTTP 探测（HEAD/GET）：
-- 目的不是拉内容，而是从响应头里捞 Content-Disposition filename
-- 那是机场自己取的订阅名（比如 "MyAirport VIP"）
-- subgen 用「机场原名 + [CONV] 前缀」作为最终 filename 传给 subconverter
+为什么要起本地 HTTP 服务器（v0.2.5 设计）：
+- v0.1: 用 data: URI base64 编码内容嵌入 URL → 大订阅撞 subconverter 414 (URI Too Long)
+- v0.2.2-v0.2.4: 直接传订阅原 URL 给 subconverter → subconverter 用自己的 UA 拉，
+  某些机场只接受 Clash 系 UA，subconverter 拿到错误页 → 'No nodes were found!'
+- v0.2.5: subgen 用 ClashMeta UA 拉到完整内容 → 在 127.0.0.1:RANDOM 起一个临时 HTTP 服务器
+  → 把 http://127.0.0.1:RANDOM/sub 传给 subconverter → subconverter 从本地 socket 拉
+  → 同时解决 414（URL 短）和 UA 问题（我们决定服务器响应内容）
 
 命名标识：
 - 前缀 [CONV] 硬编码，不可配置
@@ -23,17 +20,17 @@ subgen 仍然要做一次 HTTP 探测（HEAD/GET）：
 - 如需走代理：Clash Party 启用 TUN 模式 / 用 proxychains4 包装
 """
 from __future__ import annotations
+import http.server
 import re
 import socket
+import threading
 import urllib.parse
 import urllib.request
 import urllib.error
-from typing import NamedTuple
+from contextlib import contextmanager
+from typing import Iterator, NamedTuple
 
 from process import SUBCONVERTER_PORT
-
-
-# 注意：encode_data_uri 函数已删除（v0.2.2 不再用 data: URI，避免 414）
 
 
 # ============================================================
@@ -43,10 +40,11 @@ NAME_PREFIX = "[CONV]"   # 标记此配置为 subgen 转换产物
 
 
 class FetchResult(NamedTuple):
-    """拉订阅探测结果（不一定下载完整 body）"""
+    """拉订阅完整结果"""
     success: bool
-    upstream_filename: str   # 从 Content-Disposition 提取的机场原名（可能为空）
-    size_hint: int           # Content-Length 头（可能为 0）
+    content: bytes              # 完整订阅内容（用于喂本地 HTTP 服务器）
+    upstream_filename: str      # 从 Content-Disposition 提取的机场原名（可能为空）
+    size: int                   # len(content)
     error: str
 
 
@@ -153,73 +151,90 @@ def _parse_content_disposition(disposition: str) -> str:
 
 
 # ============================================================
-#  拉订阅探测（只读响应头，捕获机场取的名字）
+#  拉订阅（GET 完整内容 + 捕获 Content-Disposition）
 # ============================================================
 
-def fetch_subscription_info(
+def fetch_subscription(
     url: str,
     user_agent: str = "ClashMetaForAndroid/2.11.0.Meta",
-    timeout: float = 15.0,
+    timeout: float = 30.0,
 ) -> FetchResult:
     """
-    探测订阅 URL，只为了：
-      1. 验证 URL 可达 + 不是错误页
-      2. 从 Content-Disposition 头里捕获机场原名
-
-    不下载完整 body（HEAD 请求；某些机场不支持 HEAD 时回退到 GET 但只读 1KB）。
-    始终直连，不读 HTTP_PROXY 环境变量。
+    GET 订阅 URL，返回完整内容 + 机场取的名字。
+    始终直连（空 ProxyHandler）；用 ClashMeta UA 让机场以为我们是合法 Clash 客户端。
     """
     handler = urllib.request.ProxyHandler({})
     opener = urllib.request.build_opener(handler)
-
-    headers_to_send = {"User-Agent": user_agent}
-
-    # ---- 先尝试 HEAD ----
     try:
-        req = urllib.request.Request(url, method="HEAD", headers=headers_to_send)
+        req = urllib.request.Request(url, headers={"User-Agent": user_agent})
         with opener.open(req, timeout=timeout) as resp:
+            content = resp.read()
             disposition = resp.headers.get("Content-Disposition", "")
-            length = int(resp.headers.get("Content-Length", "0") or 0)
             return FetchResult(
                 success=True,
+                content=content,
                 upstream_filename=_parse_content_disposition(disposition),
-                size_hint=length,
-                error="",
-            )
-    except urllib.error.HTTPError as e:
-        # 405 = Method Not Allowed，回退到 GET
-        if e.code != 405:
-            body = e.read().decode("utf-8", errors="ignore")[:200] if hasattr(e, 'read') else ""
-            return FetchResult(False, "", 0, f"HEAD HTTP {e.code}: {e.reason} - {body}")
-    except urllib.error.URLError as e:
-        return FetchResult(False, "", 0, f"HEAD 网络错误: {e.reason}")
-    except (OSError, socket.timeout) as e:
-        return FetchResult(False, "", 0, f"HEAD 超时: {e}")
-
-    # ---- HEAD 405 → GET 兜底，只读首部不读 body ----
-    try:
-        req = urllib.request.Request(url, headers=headers_to_send)
-        with opener.open(req, timeout=timeout) as resp:
-            disposition = resp.headers.get("Content-Disposition", "")
-            length = int(resp.headers.get("Content-Length", "0") or 0)
-            # 读 1 KB 验证连接 OK，不下载完整 body
-            try:
-                resp.read(1024)
-            except Exception:
-                pass
-            return FetchResult(
-                success=True,
-                upstream_filename=_parse_content_disposition(disposition),
-                size_hint=length,
+                size=len(content),
                 error="",
             )
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")[:200] if hasattr(e, 'read') else ""
-        return FetchResult(False, "", 0, f"GET HTTP {e.code}: {e.reason} - {body}")
+        return FetchResult(False, b"", "", 0, f"HTTP {e.code}: {e.reason} - {body}")
     except urllib.error.URLError as e:
-        return FetchResult(False, "", 0, f"GET 网络错误: {e.reason}")
+        return FetchResult(False, b"", "", 0, f"网络错误: {e.reason}")
     except (OSError, socket.timeout) as e:
-        return FetchResult(False, "", 0, f"GET 超时: {e}")
+        return FetchResult(False, b"", "", 0, f"超时或连接失败: {e}")
+
+
+# ============================================================
+#  本地 HTTP 服务器（用于把内容喂给 subconverter，避开 414 + UA 问题）
+# ============================================================
+
+@contextmanager
+def serve_content_locally(content: bytes) -> Iterator[str]:
+    """
+    在 127.0.0.1 随机端口起一个临时 HTTP 服务器，serve `content`。
+    yield 出 URL，离开 with 块时自动停服务器。
+
+    解决两个问题：
+      1. URL 长度: data: URI 把 KB 级内容塞 URL 会撞 subconverter 的 URL 长度上限 (414)
+      2. UA 问题:  传订阅原 URL 给 subconverter，subconverter 用自己的 UA 拉，
+                  某些机场拒绝非 Clash UA，返回错误页 → 'No nodes were found'
+      本地 HTTP 服务器同时解决两者：URL 短（~30 字节），且我们控制响应内容。
+    """
+    # 用闭包捕获 content，不污染类属性
+    payload = content
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_HEAD(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+
+        # 静默模式：不要污染 subgen 的输出
+        def log_message(self, format, *args):
+            pass
+
+    # bind 到随机端口（port=0 让 OS 自动选）
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}/sub"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 # ============================================================
@@ -354,45 +369,48 @@ def _count_groups(yaml_text: str) -> int:
 def generate(
     subscription_url: str,
     config_url: str,
-    target: str = "clashmeta",
+    target: str = "clash",
 ) -> tuple[FetchResult, ConvertResult, str]:
     """
-    完整流程：探测订阅头 → 拼接 subconverter URL → 调 subconverter
+    完整流程:
+      1. subgen 用 ClashMeta UA 拉订阅完整内容（直连，不读 HTTP_PROXY）
+      2. 在本地 127.0.0.1:RANDOM 起临时 HTTP 服务器 serve 这份内容
+      3. 把本地服务器 URL 传给 subconverter
+      4. subconverter 从本地 socket 拉，处理，返回 YAML
+
     返回 (fetch_result, convert_result, final_filename)
 
-    final_filename 优先级：
+    final_filename 优先级:
       1. HTTP Content-Disposition 头里的 filename（机场自己取的原名）
       2. URL hostname 推导（兜底）
       然后 + [CONV] 前缀
     """
-    # 1. 探测订阅 URL，捞 Content-Disposition filename + 验证可达
-    fetch = fetch_subscription_info(subscription_url)
+    # 1. 拉订阅完整内容（subgen 用 ClashMeta UA，不读 HTTP_PROXY）
+    fetch = fetch_subscription(subscription_url)
 
     # 2. 决定最终 filename
     if fetch.success and fetch.upstream_filename:
-        # 用机场自己取的名字
         original_name = fetch.upstream_filename
     else:
-        # 兜底：从 URL 推导
         original_name = derive_name_from_url(subscription_url)
     final_filename = make_filename(original_name)
 
-    # 3. 如果探测都失败了，没必要再调 subconverter
+    # 3. 拉取失败 → 直接返回
     if not fetch.success:
         return (
             fetch,
-            ConvertResult(False, "", "", 0, 0, 0, f"订阅探测失败: {fetch.error}"),
+            ConvertResult(False, "", "", 0, 0, 0, f"订阅拉取失败: {fetch.error}"),
             final_filename,
         )
 
-    # 4. 构造 subconverter URL（直接传订阅 URL，不用 data: URI）
-    convert_url = build_convert_url(
-        subscription_url,
-        target=target,
-        config_url=config_url,
-        filename=final_filename,
-    )
+    # 4. 起本地临时 HTTP 服务器，喂内容给 subconverter
+    with serve_content_locally(fetch.content) as local_url:
+        convert_url = build_convert_url(
+            local_url,
+            target=target,
+            config_url=config_url,
+            filename=final_filename,
+        )
+        result = call_subconverter(convert_url)
 
-    # 5. 调本地 subconverter
-    result = call_subconverter(convert_url)
     return fetch, result, final_filename

@@ -158,9 +158,11 @@ def step_preset(default_id: str = "Full") -> tuple[str, str]:
     print(C.bold(f"  ── {preset.name} ──"))
     if preset.groups:
         print(f"  {C.dim('策略组 (' + str(len(preset.groups)) + ' 个):')}")
-        for i in range(0, len(preset.groups), 4):
-            chunk = preset.groups[i:i + 4]
-            print("    " + "  ".join(g.ljust(14) for g in chunk))
+        # 不用 ljust 对齐 —— Python len() 对国旗 emoji / 中文宽字符计数不准，
+        # 会导致显示错位甚至吃字符。改用 ' · ' 分隔，3 个一行，简单可靠。
+        for i in range(0, len(preset.groups), 3):
+            chunk = preset.groups[i:i + 3]
+            print("      " + "  ·  ".join(chunk))
     if preset.notes:
         print(f"  {C.dim('说明:')}")
         for n in preset.notes:
