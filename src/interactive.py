@@ -259,7 +259,15 @@ def do_generate(url: str, preset_id: str, target: str) -> int:
     print()
     print(convert_result.url)
     print()
-    print(C.dim("提示: 节点变化后，重新跑 ./subgen 生成新的 URL。"))
+    print(C.bold(C.YELLOW + "⚠ 重要：subconverter 在你按回车后才会停止" + C.RESET))
+    print(C.dim("  请把上面的 URL 粘贴到 Clash Party 的「添加订阅」"))
+    print(C.dim("  等 Clash Party 显示订阅导入成功后，再回来这里按回车"))
+    print(C.dim("  （如果在 Clash 还没拉完时就按回车，subconverter 会被关掉，订阅 URL 失效）"))
+    print()
+    try:
+        input("  导入完成？按回车退出 subgen: ")
+    except (EOFError, KeyboardInterrupt):
+        print()
     print()
     return 0
 
