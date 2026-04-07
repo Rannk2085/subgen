@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# subgen launcher (Linux/macOS)
+# 直接调用 src/main.py，不需要任何安装
+set -e
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 检测 Python 3.11+
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+    PYTHON=python
+else
+    echo "ERROR: Python 3.11+ 未安装" >&2
+    echo "  Ubuntu/Debian: sudo apt install python3" >&2
+    echo "  macOS:         brew install python3" >&2
+    exit 1
+fi
+
+# 检查版本 >= 3.11
+"$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null || {
+    echo "ERROR: 需要 Python 3.11 或更新版本（用于 tomllib 内置模块）" >&2
+    echo "  当前版本: $($PYTHON --version 2>&1)" >&2
+    exit 1
+}
+
+exec "$PYTHON" -B "$DIR/src/main.py" "$@"
