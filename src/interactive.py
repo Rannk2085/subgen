@@ -222,52 +222,77 @@ def show_confirm(url: str, preset_id: str, target: str) -> bool:
 
 
 def do_generate(url: str, preset_id: str, target: str) -> int:
-    """执行转换，返回 exit code。"""
+    """
+    执行转换，返回 exit code。
+
+    关键时序设计（解决「Clash 导入时 127.0.0.1 拒绝连接」问题）：
+      1. subgen 拉订阅内容
+      2. 起本地 HTTP 服务器（with 块开始）
+      3. 调 subconverter 完成转换 + 打印 URL
+      4. 等用户回车 ←── 本地 HTTP 服务器和 subconverter 在此期间都活着
+      5. with 块退出，本地 HTTP 服务器关闭
+      6. cli.py 主流程退出，subconverter 被杀
+    """
     preset = find_preset(preset_id)
     if preset is None:
         print(C.fail(f"未知的预设 ID: {preset_id}"))
         return 1
 
+    # ─── 步骤 1/2: 拉订阅 ───
     print()
-    print(C.info("步骤 1/2: 探测订阅..."))
-    fetch_result, convert_result, final_filename = subconv.generate(
-        subscription_url=url,
-        config_url=preset.ini_url,
-        target=target,
-    )
-
+    print(C.info("步骤 1/2: 拉订阅..."))
+    fetch_result = subconv.fetch_subscription(url)
     if not fetch_result.success:
         print(C.fail(f"  失败: {fetch_result.error}"))
         return 2
-    print(C.ok("  探测成功"))
+    print(C.ok(f"  成功 ({fetch_result.size} bytes)"))
 
+    final_filename = subconv.compute_filename(fetch_result, url)
+
+    # ─── 步骤 2/2: 起本地服务器 + 调 subconverter ───
     print()
     print(C.info("步骤 2/2: 调本地 subconverter 转换..."))
 
-    if not convert_result.success:
-        print(C.fail(f"  转换失败: {convert_result.error}"))
-        return 3
+    # 关键：本地 HTTP 服务器必须在 with 块内一直存活，
+    # 直到用户按回车（=Clash 已拉完订阅）才关闭
+    with subconv.serve_content_locally(fetch_result.content) as local_url:
+        convert_url = subconv.build_convert_url(
+            local_url,
+            target=target,
+            config_url=preset.ini_url,
+            filename=final_filename,
+        )
+        convert_result = subconv.call_subconverter(convert_url)
 
-    print(C.ok("  转换成功"))
-    print(f"    节点数:    {convert_result.proxy_count}")
-    print(f"    策略组:    {convert_result.group_count}")
-    print(f"    规则数:    {convert_result.rule_count}")
-    print(f"    YAML 大小: {len(convert_result.yaml_content)} bytes")
-    print(f"    导入后名:  {C.CYAN}{final_filename}{C.RESET}")
-    print()
-    print(C.bold("📋 转换 URL（粘贴到 Clash Party 订阅）:"))
-    print()
-    print(convert_result.url)
-    print()
-    print(C.bold(C.YELLOW + "⚠ 重要：subconverter 在你按回车后才会停止" + C.RESET))
-    print(C.dim("  请把上面的 URL 粘贴到 Clash Party 的「添加订阅」"))
-    print(C.dim("  等 Clash Party 显示订阅导入成功后，再回来这里按回车"))
-    print(C.dim("  （如果在 Clash 还没拉完时就按回车，subconverter 会被关掉，订阅 URL 失效）"))
-    print()
-    try:
-        input("  导入完成？按回车退出 subgen: ")
-    except (EOFError, KeyboardInterrupt):
+        if not convert_result.success:
+            print(C.fail(f"  转换失败: {convert_result.error}"))
+            return 3
+
+        print(C.ok("  转换成功"))
+        print(f"    节点数:    {convert_result.proxy_count}")
+        print(f"    策略组:    {convert_result.group_count}")
+        print(f"    规则数:    {convert_result.rule_count}")
+        print(f"    YAML 大小: {len(convert_result.yaml_content)} bytes")
+        print(f"    导入后名:  {C.CYAN}{final_filename}{C.RESET}")
         print()
+        print(C.bold("📋 转换 URL（粘贴到 Clash Party 订阅）:"))
+        print()
+        print(convert_result.url)
+        print()
+        print(C.bold(C.YELLOW + "⚠ 重要：在你按回车之前，"
+                              "subconverter 和本地数据服务器都会保持运行" + C.RESET))
+        print(C.dim("  操作步骤:"))
+        print(C.dim("    1. 复制上面的 URL"))
+        print(C.dim("    2. 粘贴到 Clash Party 的「添加订阅」"))
+        print(C.dim("    3. 等 Clash Party 显示『订阅已添加 / 节点已加载』"))
+        print(C.dim("    4. 回到这里按回车退出 subgen"))
+        print(C.dim("  如果太早按回车，subconverter 和本地服务器会被关掉，订阅 URL 立刻失效"))
+        print()
+        try:
+            input("  导入完成？按回车退出 subgen: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+    # ── with 块结束，本地 HTTP 服务器在这里关闭 ──
     print()
     return 0
 

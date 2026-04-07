@@ -366,51 +366,23 @@ def _count_groups(yaml_text: str) -> int:
 #  顶层入口
 # ============================================================
 
-def generate(
-    subscription_url: str,
-    config_url: str,
-    target: str = "clash",
-) -> tuple[FetchResult, ConvertResult, str]:
+def compute_filename(fetch: FetchResult, subscription_url: str) -> str:
     """
-    完整流程:
-      1. subgen 用 ClashMeta UA 拉订阅完整内容（直连，不读 HTTP_PROXY）
-      2. 在本地 127.0.0.1:RANDOM 起临时 HTTP 服务器 serve 这份内容
-      3. 把本地服务器 URL 传给 subconverter
-      4. subconverter 从本地 socket 拉，处理，返回 YAML
-
-    返回 (fetch_result, convert_result, final_filename)
-
-    final_filename 优先级:
-      1. HTTP Content-Disposition 头里的 filename（机场自己取的原名）
-      2. URL hostname 推导（兜底）
-      然后 + [CONV] 前缀
+    根据拉取结果计算最终的导入后名字（[CONV] + 原名）
+    优先用机场 Content-Disposition 给的名字，兜底用 URL hostname 推导
     """
-    # 1. 拉订阅完整内容（subgen 用 ClashMeta UA，不读 HTTP_PROXY）
-    fetch = fetch_subscription(subscription_url)
-
-    # 2. 决定最终 filename
     if fetch.success and fetch.upstream_filename:
         original_name = fetch.upstream_filename
     else:
         original_name = derive_name_from_url(subscription_url)
-    final_filename = make_filename(original_name)
+    return make_filename(original_name)
 
-    # 3. 拉取失败 → 直接返回
-    if not fetch.success:
-        return (
-            fetch,
-            ConvertResult(False, "", "", 0, 0, 0, f"订阅拉取失败: {fetch.error}"),
-            final_filename,
-        )
 
-    # 4. 起本地临时 HTTP 服务器，喂内容给 subconverter
-    with serve_content_locally(fetch.content) as local_url:
-        convert_url = build_convert_url(
-            local_url,
-            target=target,
-            config_url=config_url,
-            filename=final_filename,
-        )
-        result = call_subconverter(convert_url)
-
-    return fetch, result, final_filename
+# 注意：原来的 generate() 函数已经删除
+# 因为本地 HTTP 服务器必须在「Clash Party 拉完订阅之前」一直存活，
+# 不能被包在一个会立即返回的函数里。
+# 调用方应该自己组合：
+#   1. fetch = fetch_subscription(url)
+#   2. 用 fetch.content 拉起 with serve_content_locally(fetch.content) as local_url
+#   3. 在 with 块里调 call_subconverter，打印 URL，等用户按回车
+#   4. with 块退出 → 本地 HTTP 服务器自动关闭
