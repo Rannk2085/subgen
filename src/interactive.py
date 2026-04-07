@@ -228,7 +228,7 @@ def do_generate(url: str, preset_id: str, target: str) -> int:
         return 1
 
     print()
-    print(C.info("步骤 1/2: 拉取订阅 (始终直连)..."))
+    print(C.info("步骤 1/2: 探测订阅..."))
     fetch_result, convert_result, final_filename = subconv.generate(
         subscription_url=url,
         config_url=preset.ini_url,
@@ -236,14 +236,10 @@ def do_generate(url: str, preset_id: str, target: str) -> int:
     )
 
     if not fetch_result.success:
-        print(C.fail(f"  探测失败: {fetch_result.error}"))
+        print(C.fail(f"  失败: {fetch_result.error}"))
         return 2
+    print(C.ok("  探测成功"))
 
-    if fetch_result.upstream_filename:
-        print(C.ok(f"  探测成功，机场原名: {fetch_result.upstream_filename}"))
-    else:
-        print(C.ok(f"  探测成功 (Content-Length 头: {fetch_result.size_hint} bytes)"))
-        print(C.dim(f"  ! 机场未提供 Content-Disposition 名字，将用 URL 推导"))
     print()
     print(C.info("步骤 2/2: 调本地 subconverter 转换..."))
 
@@ -256,16 +252,13 @@ def do_generate(url: str, preset_id: str, target: str) -> int:
     print(f"    策略组:    {convert_result.group_count}")
     print(f"    规则数:    {convert_result.rule_count}")
     print(f"    YAML 大小: {len(convert_result.yaml_content)} bytes")
+    print(f"    导入后名:  {C.CYAN}{final_filename}{C.RESET}")
     print()
     print(C.bold("📋 转换 URL（粘贴到 Clash Party 订阅）:"))
     print()
     print(convert_result.url)
     print()
-    print(C.bold(f"📛 Clash 导入后的配置名: {C.CYAN}{final_filename}{C.RESET}"))
-    print(C.dim("    Clash for Windows / Mihomo Party 等会自动用作默认名"))
-    print()
-    print(C.dim("提示: 这是一次性快照 URL，订阅自动更新会失效。"))
-    print(C.dim("      节点变化后，重新跑 ./subgen 生成新的 URL。"))
+    print(C.dim("提示: 节点变化后，重新跑 ./subgen 生成新的 URL。"))
     print()
     return 0
 
@@ -284,6 +277,11 @@ def run_wizard(initial_url: str = "") -> int:
     print(C.bold("======================================="))
     print(C.bold("  subgen v0.2 · 订阅转换工具"))
     print(C.bold("======================================="))
+    print()
+    print(C.dim("  操作提示:"))
+    print(C.dim("    · 菜单选择: 输入数字 + 回车"))
+    print(C.dim("    · 走默认值: 直接按回车（标 ▸ 的那项）"))
+    print(C.dim("    · 取消退出: Ctrl+C"))
 
     url = initial_url or step_url()
     step_network_info()
