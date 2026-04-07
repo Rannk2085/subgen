@@ -112,6 +112,48 @@ def make_filename(original_name: str) -> str:
 
 
 # ============================================================
+#  ini 可达性预检（让用户在转换前就知道能不能拉到规则配置）
+# ============================================================
+
+def check_ini_reachable(
+    ini_url: str,
+    user_agent: str = "ClashMetaForAndroid/2.11.0.Meta",
+    timeout: float = 5.0,
+) -> tuple[bool, str]:
+    """
+    HEAD 请求测试 ini URL 是否可达。
+    始终直连，不读 HTTP_PROXY 环境变量（subgen 一贯做法）。
+    返回 (是否可达, 错误说明)
+    """
+    handler = urllib.request.ProxyHandler({})
+    opener = urllib.request.build_opener(handler)
+    try:
+        req = urllib.request.Request(ini_url, method="HEAD",
+                                     headers={"User-Agent": user_agent})
+        with opener.open(req, timeout=timeout) as resp:
+            if 200 <= resp.status < 400:
+                return True, ""
+            return False, f"HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        # 405 Method Not Allowed → 服务器不接受 HEAD，但 URL 是通的，回退 GET 试试
+        if e.code == 405:
+            try:
+                req = urllib.request.Request(ini_url,
+                                             headers={"User-Agent": user_agent})
+                with opener.open(req, timeout=timeout) as resp:
+                    if 200 <= resp.status < 400:
+                        return True, ""
+                    return False, f"HTTP {resp.status}"
+            except Exception as e2:
+                return False, f"GET 兜底失败: {e2}"
+        return False, f"HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return False, f"网络错误: {e.reason}"
+    except (OSError, socket.timeout) as e:
+        return False, f"超时: {e}"
+
+
+# ============================================================
 #  Content-Disposition 解析
 # ============================================================
 

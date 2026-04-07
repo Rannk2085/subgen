@@ -221,26 +221,69 @@ def show_confirm(url: str, preset_id: str, target: str) -> bool:
     return prompt_yesno("  确认生成转换 URL？", default=True)
 
 
+def _check_ini_with_retry(ini_url: str) -> str:
+    """
+    预检 ini 可达性，失败时进入 r/f/q 循环。
+    返回:
+      - ini_url     表示用户最终选择继续用这个 ini（重试成功）
+      - ""          表示 fallback (用 subconverter 内置默认 13 组)
+    抛出 SystemExit 表示用户选择退出
+    """
+    while True:
+        ok, err = subconv.check_ini_reachable(ini_url)
+        if ok:
+            print(C.ok(f"  ini 可达 ✓"))
+            return ini_url
+        # 不可达 → 走交互循环
+        print(C.fail(f"  ini 拉取失败: {err}"))
+        print()
+        print(C.bold("  ── 怎么办？──"))
+        print(C.dim("    URL: " + ini_url))
+        print()
+        print(C.dim("  原因通常是国内防火墙或节点阻断了 jsdelivr / GitHub raw 域名"))
+        print(C.dim("  解决方法："))
+        print(C.dim("    a. 启用 Clash Party 的 TUN 模式 / 系统代理后，按 r 重试"))
+        print(C.dim("    b. 或用 subconverter 内置默认配置（仅 13 组，功能简化）"))
+        print()
+        try:
+            choice = input("  选择 [r=重试 / f=用内置默认 fallback / q=退出]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise SystemExit(130)
+
+        if choice in ("", "r", "retry"):
+            print(C.info("  重试..."))
+            continue
+        if choice in ("f", "fallback"):
+            print(C.warn("  使用 subconverter 内置默认 (13 组)"))
+            return ""
+        if choice in ("q", "quit", "exit"):
+            print(C.dim("  已取消"))
+            raise SystemExit(130)
+        print(C.fail("  无效输入，请输 r / f / q"))
+
+
 def do_generate(url: str, preset_id: str, target: str) -> int:
     """
     执行转换，返回 exit code。
 
     关键时序设计（解决「Clash 导入时 127.0.0.1 拒绝连接」问题）：
       1. subgen 拉订阅内容
-      2. 起本地 HTTP 服务器（with 块开始）
-      3. 调 subconverter 完成转换 + 打印 URL
-      4. 等用户回车 ←── 本地 HTTP 服务器和 subconverter 在此期间都活着
-      5. with 块退出，本地 HTTP 服务器关闭
-      6. cli.py 主流程退出，subconverter 被杀
+      2. 预检 ini URL 可达性（不可达时让用户选 r/f/q）
+      3. 起本地 HTTP 服务器（with 块开始）
+      4. 调 subconverter 完成转换 + 打印 URL
+      5. 等用户回车 ←── 本地 HTTP 服务器和 subconverter 在此期间都活着
+      6. with 块退出，本地 HTTP 服务器关闭
+      7. cli.py 主流程退出，subconverter 被杀
     """
     preset = find_preset(preset_id)
     if preset is None:
         print(C.fail(f"未知的预设 ID: {preset_id}"))
         return 1
 
-    # ─── 步骤 1/2: 拉订阅 ───
+    # ─── 步骤 1/3: 拉订阅 ───
     print()
-    print(C.info("步骤 1/2: 拉订阅..."))
+    print(C.info("步骤 1/3: 拉订阅..."))
     fetch_result = subconv.fetch_subscription(url)
     if not fetch_result.success:
         print(C.fail(f"  失败: {fetch_result.error}"))
@@ -249,9 +292,19 @@ def do_generate(url: str, preset_id: str, target: str) -> int:
 
     final_filename = subconv.compute_filename(fetch_result, url)
 
-    # ─── 步骤 2/2: 起本地服务器 + 调 subconverter ───
+    # ─── 步骤 2/3: 预检 ini 可达性 ───
     print()
-    print(C.info("步骤 2/2: 调本地 subconverter 转换..."))
+    print(C.info("步骤 2/3: 预检规则配置 ini 可达性..."))
+    if preset.ini_url:
+        effective_ini_url = _check_ini_with_retry(preset.ini_url)
+    else:
+        # 自定义预设可能没 ini_url
+        effective_ini_url = ""
+        print(C.dim("  (无 ini URL，使用 subconverter 内置默认)"))
+
+    # ─── 步骤 3/3: 起本地服务器 + 调 subconverter ───
+    print()
+    print(C.info("步骤 3/3: 调本地 subconverter 转换..."))
 
     # 关键：本地 HTTP 服务器必须在 with 块内一直存活，
     # 直到用户按回车（=Clash 已拉完订阅）才关闭
@@ -259,7 +312,7 @@ def do_generate(url: str, preset_id: str, target: str) -> int:
         convert_url = subconv.build_convert_url(
             local_url,
             target=target,
-            config_url=preset.ini_url,
+            config_url=effective_ini_url,  # 可能是空字符串（fallback 模式）
             filename=final_filename,
         )
         convert_result = subconv.call_subconverter(convert_url)

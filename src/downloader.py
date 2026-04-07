@@ -180,7 +180,29 @@ def download(proxy_url: str | None = None, force: bool = False) -> tuple[bool, s
         if bp.exists():
             bp.chmod(0o755)
 
+    # 把 pref.toml 的 cache_config 改成 0（每次都重新拉 ini，避免 5 分钟陈旧）
+    _patch_pref_toml()
+
     return True, f"已安装 {tag} 到 {SUBCONVERTER_DIR}"
+
+
+def _patch_pref_toml() -> None:
+    """
+    安装/重装后修改 subconverter 的 pref.toml:
+      - cache_config = 0   每次重新拉 ini 配置（不缓存 5 分钟）
+    其他默认值保持不变。
+    """
+    pref = SUBCONVERTER_DIR / "pref.toml"
+    if not pref.exists():
+        return
+    try:
+        text = pref.read_text(encoding="utf-8")
+        new = text.replace("cache_config = 300", "cache_config = 0")
+        if new != text:
+            pref.write_text(new, encoding="utf-8")
+            print(C.dim("  已设置 cache_config = 0 (每次拉新 ini)"))
+    except OSError:
+        pass
 
 
 def copy_existing(source_dir: Path) -> tuple[bool, str]:
