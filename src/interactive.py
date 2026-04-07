@@ -236,10 +236,14 @@ def do_generate(url: str, preset_id: str, target: str) -> int:
     )
 
     if not fetch_result.success:
-        print(C.fail(f"  拉取失败: {fetch_result.error}"))
+        print(C.fail(f"  探测失败: {fetch_result.error}"))
         return 2
 
-    print(C.ok(f"  拉取成功 ({fetch_result.size} bytes)"))
+    if fetch_result.upstream_filename:
+        print(C.ok(f"  探测成功，机场原名: {fetch_result.upstream_filename}"))
+    else:
+        print(C.ok(f"  探测成功 (Content-Length 头: {fetch_result.size_hint} bytes)"))
+        print(C.dim(f"  ! 机场未提供 Content-Disposition 名字，将用 URL 推导"))
     print()
     print(C.info("步骤 2/2: 调本地 subconverter 转换..."))
 

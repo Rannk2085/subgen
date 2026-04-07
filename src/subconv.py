@@ -1,25 +1,29 @@
 """
-核心：拉订阅 → base64 → data: URI → 调本地 subconverter 生成转换 URL
+核心：调本地 subconverter 把订阅 URL 转成 Clash 配置
 
-技术要点（来自 Agent 3 调研）：
-- subconverter 支持 data:text/plain;base64,... URL scheme
-- 我们用 Python 拉订阅（始终直连），再 base64 喂进去
-- 缺点：data: URI 是快照，Clash Party 拿到的内容是固定的，需要重新跑 subgen 才能更新
+设计：
+- subgen **不再** 用 data: URI 编码订阅内容（会撞 subconverter HTTP URL 长度上限 → 414）
+- 直接把原始订阅 URL 传给 subconverter，由它自己拉
+- subgen 和 subconverter 在同一台机器上跑，出口 IP 完全一致，效果一样
+- subconverter 默认 proxy_subscription = NONE，跟 subgen 的「始终直连」策略一致
+
+subgen 仍然要做一次 HTTP 探测（HEAD/GET）：
+- 目的不是拉内容，而是从响应头里捞 Content-Disposition filename
+- 那是机场自己取的订阅名（比如 "MyAirport VIP"）
+- subgen 用「机场原名 + [CONV] 前缀」作为最终 filename 传给 subconverter
 
 命名标识：
-- subconverter 支持 &filename= 参数，会写到 Content-Disposition 响应头
-- Clash for Windows / Mihomo Party 等客户端导入订阅时会用作默认配置名
-- 我们自动加一个固定的英文缩写前缀 [CONV]，区分「这是 subgen 转换出来的配置」
-- 前缀不可配置，硬编码为 [CONV]
+- 前缀 [CONV] 硬编码，不可配置
+- 原名优先级: 1) HTTP Content-Disposition filename
+              2) URL hostname 推导（兜底）
+- 最终: "[CONV] 机场原名"
 
 网络策略：
-- subgen 始终直连拉订阅，不读 HTTP_PROXY 环境变量
-- 如果用户需要走代理，应启用 Clash Party 的 TUN 模式 / 系统代理
-  或者用 proxychains4 包装运行 subgen
+- subgen 始终直连，不读 HTTP_PROXY 环境变量
+- 如需走代理：Clash Party 启用 TUN 模式 / 用 proxychains4 包装
 """
 from __future__ import annotations
-import base64
-import json
+import re
 import socket
 import urllib.parse
 import urllib.request
@@ -29,6 +33,9 @@ from typing import NamedTuple
 from process import SUBCONVERTER_PORT
 
 
+# 注意：encode_data_uri 函数已删除（v0.2.2 不再用 data: URI，避免 414）
+
+
 # ============================================================
 #  常量：转换标识前缀（英文缩写，硬编码不可配）
 # ============================================================
@@ -36,9 +43,10 @@ NAME_PREFIX = "[CONV]"   # 标记此配置为 subgen 转换产物
 
 
 class FetchResult(NamedTuple):
+    """拉订阅探测结果（不一定下载完整 body）"""
     success: bool
-    content: bytes
-    size: int
+    upstream_filename: str   # 从 Content-Disposition 提取的机场原名（可能为空）
+    size_hint: int           # Content-Length 头（可能为 0）
     error: str
 
 
@@ -106,51 +114,120 @@ def make_filename(original_name: str) -> str:
 
 
 # ============================================================
-#  拉订阅
+#  Content-Disposition 解析
 # ============================================================
 
-def fetch_subscription(
+def _parse_content_disposition(disposition: str) -> str:
+    """
+    从 Content-Disposition 头里提取 filename
+    支持两种格式:
+      Content-Disposition: attachment; filename="MyAirport"
+      Content-Disposition: attachment; filename*=UTF-8''%E6%9C%BA%E5%9C%BA
+    RFC 5987 的 filename*= 优先级高于 filename=
+    """
+    if not disposition:
+        return ""
+
+    # 1. 优先 filename*= (RFC 5987 编码格式)
+    m = re.search(r"filename\*\s*=\s*([^;]+)", disposition, re.IGNORECASE)
+    if m:
+        value = m.group(1).strip()
+        # 格式: charset'lang'percent_encoded_value
+        parts = value.split("'", 2)
+        if len(parts) == 3:
+            charset, _lang, encoded = parts
+            try:
+                return urllib.parse.unquote(encoded, encoding=charset or "utf-8").strip()
+            except Exception:
+                pass
+
+    # 2. 回退 filename=
+    m = re.search(r'filename\s*=\s*"([^"]+)"', disposition, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r"filename\s*=\s*([^;]+)", disposition, re.IGNORECASE)
+    if m:
+        return m.group(1).strip().strip('"').strip("'")
+
+    return ""
+
+
+# ============================================================
+#  拉订阅探测（只读响应头，捕获机场取的名字）
+# ============================================================
+
+def fetch_subscription_info(
     url: str,
     user_agent: str = "ClashMetaForAndroid/2.11.0.Meta",
-    timeout: float = 30.0,
+    timeout: float = 15.0,
 ) -> FetchResult:
     """
-    拉取订阅原始内容。
-    始终直连：强制使用空 ProxyHandler，不读 HTTP_PROXY 环境变量。
-    如果需要走代理，请用 Clash Party 的 TUN 模式或 proxychains4 包装运行。
+    探测订阅 URL，只为了：
+      1. 验证 URL 可达 + 不是错误页
+      2. 从 Content-Disposition 头里捕获机场原名
+
+    不下载完整 body（HEAD 请求；某些机场不支持 HEAD 时回退到 GET 但只读 1KB）。
+    始终直连，不读 HTTP_PROXY 环境变量。
     """
-    # 强制直连：空 ProxyHandler 会覆盖默认从环境变量读 proxy 的行为
     handler = urllib.request.ProxyHandler({})
     opener = urllib.request.build_opener(handler)
+
+    headers_to_send = {"User-Agent": user_agent}
+
+    # ---- 先尝试 HEAD ----
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+        req = urllib.request.Request(url, method="HEAD", headers=headers_to_send)
         with opener.open(req, timeout=timeout) as resp:
-            content = resp.read()
-            return FetchResult(True, content, len(content), "")
+            disposition = resp.headers.get("Content-Disposition", "")
+            length = int(resp.headers.get("Content-Length", "0") or 0)
+            return FetchResult(
+                success=True,
+                upstream_filename=_parse_content_disposition(disposition),
+                size_hint=length,
+                error="",
+            )
+    except urllib.error.HTTPError as e:
+        # 405 = Method Not Allowed，回退到 GET
+        if e.code != 405:
+            body = e.read().decode("utf-8", errors="ignore")[:200] if hasattr(e, 'read') else ""
+            return FetchResult(False, "", 0, f"HEAD HTTP {e.code}: {e.reason} - {body}")
+    except urllib.error.URLError as e:
+        return FetchResult(False, "", 0, f"HEAD 网络错误: {e.reason}")
+    except (OSError, socket.timeout) as e:
+        return FetchResult(False, "", 0, f"HEAD 超时: {e}")
+
+    # ---- HEAD 405 → GET 兜底，只读首部不读 body ----
+    try:
+        req = urllib.request.Request(url, headers=headers_to_send)
+        with opener.open(req, timeout=timeout) as resp:
+            disposition = resp.headers.get("Content-Disposition", "")
+            length = int(resp.headers.get("Content-Length", "0") or 0)
+            # 读 1 KB 验证连接 OK，不下载完整 body
+            try:
+                resp.read(1024)
+            except Exception:
+                pass
+            return FetchResult(
+                success=True,
+                upstream_filename=_parse_content_disposition(disposition),
+                size_hint=length,
+                error="",
+            )
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")[:200] if hasattr(e, 'read') else ""
-        return FetchResult(False, b"", 0, f"HTTP {e.code}: {e.reason} - {body}")
+        return FetchResult(False, "", 0, f"GET HTTP {e.code}: {e.reason} - {body}")
     except urllib.error.URLError as e:
-        return FetchResult(False, b"", 0, f"网络错误: {e.reason}")
+        return FetchResult(False, "", 0, f"GET 网络错误: {e.reason}")
     except (OSError, socket.timeout) as e:
-        return FetchResult(False, b"", 0, f"超时或连接失败: {e}")
+        return FetchResult(False, "", 0, f"GET 超时: {e}")
 
 
 # ============================================================
-#  data: URI 编码 + URL 构造
+#  URL 构造
 # ============================================================
-
-def encode_data_uri(content: bytes) -> str:
-    """
-    把订阅内容编码为 data:text/plain;base64,... URI
-    subconverter 看到这个 URI 后会直接 base64 解码使用，不发起任何网络请求。
-    """
-    b64 = base64.b64encode(content).decode("ascii")
-    return f"data:text/plain;base64,{b64}"
-
 
 def build_convert_url(
-    subscription_payload: str,    # 可以是原始 URL 或 data: URI
+    subscription_url: str,
     target: str = "clash",
     config_url: str = "",
     filename: str = "",
@@ -159,13 +236,16 @@ def build_convert_url(
     """
     构造调用本地 subconverter 的完整 URL
 
-    filename 通过 &filename= 传给 subconverter，subconverter 会在响应头里设
+    把原始订阅 URL 直接作为 url= 参数传给 subconverter（不再 base64 编码）。
+    subconverter 会自己拉这个 URL（同机器同 IP，跟 subgen 直连效果一致）。
+
+    filename 通过 &filename= 传给 subconverter，subconverter 在响应头里设
         Content-Disposition: attachment; filename=...
     支持的客户端（Clash for Windows / Mihomo Party 等）导入时会用作默认配置名。
     """
     params = {
         "target": target,
-        "url": subscription_payload,
+        "url": subscription_url,
     }
     if config_url:
         params["config"] = config_url
@@ -277,30 +357,42 @@ def generate(
     target: str = "clashmeta",
 ) -> tuple[FetchResult, ConvertResult, str]:
     """
-    完整流程：拉订阅（始终直连）→ 编码 → 调 subconverter
+    完整流程：探测订阅头 → 拼接 subconverter URL → 调 subconverter
     返回 (fetch_result, convert_result, final_filename)
 
-    final_filename 是 Clash 导入后看到的配置名 = [CONV] + 原本名字
-    （原本名字从订阅 URL 自动推导，不可配置）
+    final_filename 优先级：
+      1. HTTP Content-Disposition 头里的 filename（机场自己取的原名）
+      2. URL hostname 推导（兜底）
+      然后 + [CONV] 前缀
     """
-    # 计算最终文件名（即使 fetch 失败也要返回，方便日志）
-    original_name = derive_name_from_url(subscription_url)
+    # 1. 探测订阅 URL，捞 Content-Disposition filename + 验证可达
+    fetch = fetch_subscription_info(subscription_url)
+
+    # 2. 决定最终 filename
+    if fetch.success and fetch.upstream_filename:
+        # 用机场自己取的名字
+        original_name = fetch.upstream_filename
+    else:
+        # 兜底：从 URL 推导
+        original_name = derive_name_from_url(subscription_url)
     final_filename = make_filename(original_name)
 
-    fetch = fetch_subscription(subscription_url)
+    # 3. 如果探测都失败了，没必要再调 subconverter
     if not fetch.success:
         return (
             fetch,
-            ConvertResult(False, "", "", 0, 0, 0, "未拉到订阅，跳过转换"),
+            ConvertResult(False, "", "", 0, 0, 0, f"订阅探测失败: {fetch.error}"),
             final_filename,
         )
 
-    data_uri = encode_data_uri(fetch.content)
+    # 4. 构造 subconverter URL（直接传订阅 URL，不用 data: URI）
     convert_url = build_convert_url(
-        data_uri,
+        subscription_url,
         target=target,
         config_url=config_url,
         filename=final_filename,
     )
+
+    # 5. 调本地 subconverter
     result = call_subconverter(convert_url)
     return fetch, result, final_filename
