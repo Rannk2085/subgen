@@ -1,5 +1,5 @@
 """
-TOML 配置 / 状态 / 预设 持久化
+TOML 配置 / 预设 持久化
 - 读 TOML：用 stdlib tomllib (Python 3.11+)
 - 写 TOML：自己实现的简易 serializer，支持平铺 [section] + 字符串/数字/bool/列表
 - 原子写：临时文件 + os.replace
@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from env import CONFIG_FILE, STATE_FILE, PRESETS_DIR
+from env import CONFIG_FILE, PRESETS_DIR
 
 
 # =================================================================
@@ -105,16 +105,13 @@ def atomic_write(path: Path, content: str) -> None:
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": 1,
     "general": {
-        "default_target": "clash",
+        # 默认规则套餐 ID（参考 src/presets_data.py 里的 PRESETS）
         "default_preset_id": "Full",
+        # 默认目标客户端
+        "default_target": "clashmeta",
     },
     "subconverter": {
         "port": 25500,
-        "auto_start": True,
-    },
-    "network": {
-        # 注意：这只是默认推荐，每次拉订阅时仍会问
-        "default_proxy_url": "http://127.0.0.1:7890",
     },
 }
 
@@ -131,49 +128,6 @@ def load_config() -> dict[str, Any]:
 
 def save_config(cfg: dict[str, Any]) -> None:
     atomic_write(CONFIG_FILE, dumps(cfg))
-
-
-# =================================================================
-#  State 读写（上次选择记忆）
-# =================================================================
-
-DEFAULT_STATE: dict[str, Any] = {
-    "version": 1,
-    "last": {
-        "subscription_url": "",
-        "network_mode": "DIRECT",   # DIRECT | PROXY | CUSTOM
-        "custom_proxy": "",
-        "preset_id": "Full",
-        "target": "clash",
-    },
-    "subconverter": {
-        "last_pid": 0,
-    },
-}
-
-
-def load_state() -> dict[str, Any]:
-    if not STATE_FILE.exists():
-        return {k: (v.copy() if isinstance(v, dict) else v) for k, v in DEFAULT_STATE.items()}
-    try:
-        with open(STATE_FILE, "rb") as f:
-            data = tomllib.load(f)
-        # 合并默认值，防止字段缺失
-        merged = DEFAULT_STATE.copy()
-        for k, v in data.items():
-            if isinstance(v, dict) and isinstance(merged.get(k), dict):
-                merged_section = merged[k].copy()
-                merged_section.update(v)
-                merged[k] = merged_section
-            else:
-                merged[k] = v
-        return merged
-    except (OSError, tomllib.TOMLDecodeError):
-        return {k: (v.copy() if isinstance(v, dict) else v) for k, v in DEFAULT_STATE.items()}
-
-
-def save_state(state: dict[str, Any]) -> None:
-    atomic_write(STATE_FILE, dumps(state))
 
 
 # =================================================================

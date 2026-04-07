@@ -18,26 +18,25 @@ if os.environ.get("SUBGEN_HOME"):
     PROJECT_ROOT = Path(os.environ["SUBGEN_HOME"]).resolve()
 
 # ----- 数据目录（运行时生成，被 .gitignore） -----
+# 注意：不创建 data/run/（subconverter 是 ephemeral 模式，不需要 PID 文件）
+# 注意：不存 data/state.toml（subgen v0.2 不再记忆上次选择，每次都用 config 默认值）
 DATA_DIR: Path = PROJECT_ROOT / "data"
 
 BIN_DIR:     Path = DATA_DIR / "bin"
 CACHE_DIR:   Path = DATA_DIR / "cache"
 LOGS_DIR:    Path = DATA_DIR / "logs"
-RUN_DIR:     Path = DATA_DIR / "run"
 PRESETS_DIR: Path = DATA_DIR / "presets"
 
 CONFIG_FILE: Path = DATA_DIR / "config.toml"
-STATE_FILE:  Path = DATA_DIR / "state.toml"
 
 SUBCONVERTER_DIR: Path = BIN_DIR / "subconverter"
-SUBCONVERTER_PID: Path = RUN_DIR / "subconverter.pid"
 SUBCONVERTER_LOG: Path = LOGS_DIR / "subconverter.log"
 SUBGEN_LOG:       Path = LOGS_DIR / "subgen.log"
 
 
 def ensure_dirs() -> None:
     """确保所有运行时目录存在。幂等。"""
-    for d in (DATA_DIR, BIN_DIR, CACHE_DIR, LOGS_DIR, RUN_DIR, PRESETS_DIR, SUBCONVERTER_DIR):
+    for d in (DATA_DIR, BIN_DIR, CACHE_DIR, LOGS_DIR, PRESETS_DIR, SUBCONVERTER_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 

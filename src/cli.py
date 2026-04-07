@@ -1,13 +1,12 @@
 """
-命令行解析与子命令路由
+命令行解析与子命令路由（ephemeral 模式）
+需要 subconverter 的命令会在主进程内启动子进程，命令结束后自动停止。
 """
 from __future__ import annotations
 import sys
 
-from env import C, ensure_dirs, enable_windows_ansi
 import process
-import interactive
-from storage import load_state
+from env import C, ensure_dirs, enable_windows_ansi, subconverter_binary_path
 
 
 HELP_TEXT = """\
@@ -16,74 +15,33 @@ subgen - 订阅转换工具 (subconverter 的交互式包装)
 用法:
   ./subgen                       进入交互式向导（最常用）
   ./subgen gen <URL>             命令行模式，跳过 URL 输入
-  ./subgen status                查看 subconverter 服务状态
-  ./subgen start                 启动 subconverter 后台服务
-  ./subgen stop                  停止 subconverter
-  ./subgen restart               重启 subconverter
   ./subgen install               下载并安装 subconverter（首次使用）
+  ./subgen install --force       强制重装
+  ./subgen clean                 清空缓存和日志
   ./subgen doctor                诊断当前环境
-  ./subgen version               显示版本信息
+  ./subgen version               显示版本
   ./subgen help                  显示这个帮助
 
-环境变量:
-  SUBGEN_HOME                    覆盖项目根目录（默认：subgen 文件夹本身）
+subconverter 子进程：
+  subgen 在跑命令时自动启动 subconverter，命令结束后自动停止。
+  不需要手动 start/stop。
 
-文件位置（全部相对于项目根目录）:
+网络：
+  subgen 始终直连拉订阅，不读 HTTP_PROXY 环境变量。
+  如需走代理，请启用 Clash Party 的 TUN 模式或用 proxychains4 包装。
+
+文件位置（全部相对项目根目录）:
   data/bin/subconverter/         subconverter 二进制
   data/config.toml               全局配置
-  data/state.toml                上次选择记忆
   data/presets/                  命名预设
-  data/cache/                    远程资源缓存
-  data/logs/                     日志
-  data/run/                      PID 文件
+  data/cache/                    远程资源缓存（subgen clean 可清空）
+  data/logs/                     日志（subgen clean 可清空）
 """
 
 
-def cmd_status() -> int:
-    s = process.status()
-    print()
-    if s["running"]:
-        print(C.ok(f"subconverter 运行中"))
-        print(f"  PID:     {s['pid']}")
-        print(f"  端口:    127.0.0.1:{s['port']} (监听中)")
-        if s.get("version"):
-            print(f"  版本:    {s['version']}")
-    else:
-        print(C.fail("subconverter 未运行"))
-        if s["pid"] and not s["pid_alive"]:
-            print(C.dim(f"  PID 文件残留: {s['pid']}"))
-        elif not s["port_listening"]:
-            print(C.dim("  端口未监听"))
-        print()
-        print(C.info("启动: ./subgen start"))
-    print()
-    return 0 if s["running"] else 1
-
-
-def cmd_start() -> int:
-    print(C.info("启动 subconverter..."))
-    ok, msg = process.start()
-    if ok:
-        print(C.ok(msg))
-        return 0
-    print(C.fail(msg))
-    return 1
-
-
-def cmd_stop() -> int:
-    print(C.info("停止 subconverter..."))
-    ok, msg = process.stop()
-    if ok:
-        print(C.ok(msg))
-        return 0
-    print(C.fail(msg))
-    return 1
-
-
-def cmd_restart() -> int:
-    process.stop()
-    return cmd_start()
-
+# =================================================================
+#  不需要 subconverter 的命令
+# =================================================================
 
 def cmd_install(force: bool = False) -> int:
     import downloader
@@ -108,14 +66,37 @@ def cmd_install(force: bool = False) -> int:
     return 1
 
 
+def cmd_clean() -> int:
+    """清空 data/cache 和 data/logs 目录的内容（保留目录本身）"""
+    from env import CACHE_DIR, LOGS_DIR, C
+    import shutil
+
+    cleaned = []
+    for d in (CACHE_DIR, LOGS_DIR):
+        if d.exists():
+            for item in d.iterdir():
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+            cleaned.append(str(d))
+
+    if cleaned:
+        print(C.ok("已清理:"))
+        for d in cleaned:
+            print(f"  {d}")
+    else:
+        print(C.dim("没有需要清理的内容"))
+    return 0
+
+
 def cmd_doctor() -> int:
     """简易诊断"""
     print()
-    print(C.bold("═══ subgen doctor ═══"))
+    print(C.bold("=== subgen doctor ==="))
     print()
 
-    import downloader
-    from env import subconverter_binary_path, DATA_DIR
+    from env import DATA_DIR
 
     rc = 0
 
@@ -123,9 +104,9 @@ def cmd_doctor() -> int:
     print(C.bold("[1] Python"))
     py_ok = sys.version_info >= (3, 11)
     if py_ok:
-        print(C.ok(f"  Python {sys.version.split()[0]} (需要 ≥ 3.11)"))
+        print(C.ok(f"  Python {sys.version.split()[0]} (需要 >= 3.11)"))
     else:
-        print(C.fail(f"  Python {sys.version.split()[0]} 太老了，需要 ≥ 3.11"))
+        print(C.fail(f"  Python {sys.version.split()[0]} 太老了，需要 >= 3.11"))
         rc = 2
 
     # 2. 数据目录
@@ -145,27 +126,18 @@ def cmd_doctor() -> int:
         print(C.info("    安装: ./subgen install"))
         rc = 2
 
-    # 4. subconverter 服务
-    print(C.bold("[4] subconverter 服务"))
-    s = process.status()
-    if s["running"]:
-        print(C.ok(f"  运行中 pid={s['pid']} port={s['port']}"))
-        if s.get("version"):
-            print(C.dim(f"    {s['version']}"))
-    else:
-        print(C.warn("  未运行"))
-        print(C.info("    启动: ./subgen start"))
-        rc = max(rc, 1)
-
-    # 5. 网络
-    print(C.bold("[5] 网络环境"))
-    from network import detect_env, render_snapshot
-    snap = detect_env(probe_proxy=False)
-    print(render_snapshot(snap))
+    # 4. 网络环境
+    print(C.bold("[4] 网络环境"))
+    try:
+        from network import detect_env, render_snapshot
+        snap = detect_env()
+        print(render_snapshot(snap))
+    except Exception as e:
+        print(C.dim(f"  (跳过网络探测: {e})"))
 
     print()
     if rc == 0:
-        print(C.ok("一切正常 ✨"))
+        print(C.ok("一切正常"))
     elif rc == 1:
         print(C.warn("有警告，但功能可用"))
     else:
@@ -175,16 +147,8 @@ def cmd_doctor() -> int:
 
 
 def cmd_version() -> int:
-    from . import __version__
-    print(f"subgen {__version__}")
+    print("subgen 0.2.0")
     return 0
-
-
-def cmd_gen(args: list[str]) -> int:
-    """命令行模式：./subgen gen <URL>"""
-    if not args:
-        return interactive.run_wizard()
-    return interactive.run_wizard(initial_url=args[0])
 
 
 def cmd_help() -> int:
@@ -193,48 +157,77 @@ def cmd_help() -> int:
 
 
 # =================================================================
-#  主分发
+#  路由
 # =================================================================
+
+# 不需要 subconverter 的命令
+NO_SUBCONV_COMMANDS = {
+    "install", "version", "--version", "-v",
+    "help", "--help", "-h", "clean", "doctor",
+}
+
+
+def route_no_subconv(cmd: "str | None", argv: list[str]) -> int:
+    try:
+        if cmd in ("install",):
+            return cmd_install(force="--force" in argv)
+        if cmd in ("version", "--version", "-v"):
+            return cmd_version()
+        if cmd in ("help", "--help", "-h"):
+            return cmd_help()
+        if cmd == "clean":
+            return cmd_clean()
+        if cmd == "doctor":
+            return cmd_doctor()
+    except KeyboardInterrupt:
+        print()
+        return 130
+    return 1
+
 
 def main(argv: list[str]) -> int:
     enable_windows_ansi()
     ensure_dirs()
 
-    if not argv:
-        # 默认进交互向导
-        return interactive.run_wizard()
+    cmd = argv[0] if argv else None
 
-    cmd = argv[0]
-    rest = argv[1:]
+    # 路由到不需要 subconverter 的命令
+    if cmd in NO_SUBCONV_COMMANDS:
+        return route_no_subconv(cmd, argv)
 
-    routes = {
-        "gen":     lambda: cmd_gen(rest),
-        "status":  cmd_status,
-        "start":   cmd_start,
-        "stop":    cmd_stop,
-        "restart": cmd_restart,
-        "install": lambda: cmd_install(force="--force" in rest),
-        "doctor":  cmd_doctor,
-        "version": cmd_version,
-        "--version": cmd_version,
-        "-v":      cmd_version,
-        "help":    cmd_help,
-        "--help":  cmd_help,
-        "-h":      cmd_help,
-    }
+    # 默认 / gen / URL → 需要 subconverter
+    # 检查二进制
+    if not subconverter_binary_path().exists():
+        print(C.fail("subconverter 二进制不存在"))
+        print(C.info("请先运行: ./subgen install"))
+        return 2
 
-    if cmd in routes:
-        try:
-            return routes[cmd]()
-        except KeyboardInterrupt:
-            print()
-            print(C.dim("[已取消]"))
-            return 130
+    # 启动 subconverter（ephemeral，跑完就杀）
+    print(C.dim("正在启动 subconverter..."))
+    ok, proc, msg = process.start_blocking(timeout=10)
+    if not ok:
+        print(C.fail(f"启动 subconverter 失败: {msg}"))
+        print(C.info("查看日志: cat ~/subgen/data/logs/subconverter.log"))
+        return 2
+    print(C.dim(f"  ok {msg}"))
 
-    # 未知命令：可能是 URL 直传
-    if cmd.startswith(("http://", "https://")):
-        return interactive.run_wizard(initial_url=cmd)
-
-    print(C.fail(f"未知命令: {cmd}"))
-    print(C.dim("用 ./subgen help 查看用法"))
-    return 1
+    try:
+        import interactive
+        # 跑实际命令
+        if cmd is None:
+            return interactive.run_wizard()
+        if cmd == "gen":
+            return interactive.run_wizard(initial_url=argv[1] if len(argv) > 1 else "")
+        if cmd.startswith(("http://", "https://")):
+            return interactive.run_wizard(initial_url=cmd)
+        print(C.fail(f"未知命令: {cmd}"))
+        print(C.dim("用 ./subgen help 查看用法"))
+        return 1
+    except KeyboardInterrupt:
+        print()
+        print(C.dim("[已取消]"))
+        return 130
+    finally:
+        # 总是清理 subconverter
+        process.stop(proc)
+        print(C.dim("subconverter 已停止"))

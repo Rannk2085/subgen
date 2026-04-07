@@ -3,15 +3,19 @@
 
 技术要点（来自 Agent 3 调研）：
 - subconverter 支持 data:text/plain;base64,... URL scheme
-- 我们用 Python 用任意网络拉订阅，再 base64 喂进去
-- 这样可以「每订阅独立选网络」而不需要修改 subconverter 配置
+- 我们用 Python 拉订阅（始终直连），再 base64 喂进去
 - 缺点：data: URI 是快照，Clash Party 拿到的内容是固定的，需要重新跑 subgen 才能更新
 
 命名标识：
 - subconverter 支持 &filename= 参数，会写到 Content-Disposition 响应头
 - Clash for Windows / Mihomo Party 等客户端导入订阅时会用作默认配置名
-- 我们自动加一个固定的英文缩写前缀 [SG]，区分「这是 subgen 转换出来的配置」
-- 前缀不可配置，硬编码为 [SG]
+- 我们自动加一个固定的英文缩写前缀 [CONV]，区分「这是 subgen 转换出来的配置」
+- 前缀不可配置，硬编码为 [CONV]
+
+网络策略：
+- subgen 始终直连拉订阅，不读 HTTP_PROXY 环境变量
+- 如果用户需要走代理，应启用 Clash Party 的 TUN 模式 / 系统代理
+  或者用 proxychains4 包装运行 subgen
 """
 from __future__ import annotations
 import base64
@@ -28,7 +32,7 @@ from process import SUBCONVERTER_PORT
 # ============================================================
 #  常量：转换标识前缀（英文缩写，硬编码不可配）
 # ============================================================
-NAME_PREFIX = "[SG]"   # SubGen 缩写，标记此配置为 subgen 转换产物
+NAME_PREFIX = "[CONV]"   # 标记此配置为 subgen 转换产物
 
 
 class FetchResult(NamedTuple):
@@ -92,7 +96,7 @@ def derive_name_from_url(url: str) -> str:
 def make_filename(original_name: str) -> str:
     """
     把原始名字 + 标识前缀 = Clash 导入后看到的配置名
-    例如: link01 → [SG] link01
+    例如: link01 → [CONV] link01
     幂等：已经有前缀的不重复加。
     """
     name = (original_name or "subscription").strip()
@@ -107,27 +111,17 @@ def make_filename(original_name: str) -> str:
 
 def fetch_subscription(
     url: str,
-    network_mode: str,        # DIRECT | PROXY | CUSTOM
-    custom_proxy: str = "",
     user_agent: str = "ClashMetaForAndroid/2.11.0.Meta",
     timeout: float = 30.0,
 ) -> FetchResult:
-    """用指定网络模式拉取订阅原始内容。"""
-    handlers = []
-
-    if network_mode == "DIRECT":
-        handlers.append(urllib.request.ProxyHandler({}))
-    elif network_mode == "PROXY":
-        proxy = "http://127.0.0.1:7890"
-        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-    elif network_mode == "CUSTOM":
-        if not custom_proxy:
-            return FetchResult(False, b"", 0, "CUSTOM 模式但未提供 proxy URL")
-        handlers.append(urllib.request.ProxyHandler({"http": custom_proxy, "https": custom_proxy}))
-    else:
-        return FetchResult(False, b"", 0, f"未知网络模式: {network_mode}")
-
-    opener = urllib.request.build_opener(*handlers)
+    """
+    拉取订阅原始内容。
+    始终直连：强制使用空 ProxyHandler，不读 HTTP_PROXY 环境变量。
+    如果需要走代理，请用 Clash Party 的 TUN 模式或 proxychains4 包装运行。
+    """
+    # 强制直连：空 ProxyHandler 会覆盖默认从环境变量读 proxy 的行为
+    handler = urllib.request.ProxyHandler({})
+    opener = urllib.request.build_opener(handler)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": user_agent})
         with opener.open(req, timeout=timeout) as resp:
@@ -279,23 +273,21 @@ def _count_groups(yaml_text: str) -> int:
 
 def generate(
     subscription_url: str,
-    network_mode: str,
-    custom_proxy: str,
     config_url: str,
-    target: str = "clash",
+    target: str = "clashmeta",
 ) -> tuple[FetchResult, ConvertResult, str]:
     """
-    完整流程：拉订阅 → 编码 → 调 subconverter
+    完整流程：拉订阅（始终直连）→ 编码 → 调 subconverter
     返回 (fetch_result, convert_result, final_filename)
 
-    final_filename 是 Clash 导入后看到的配置名 = [SG] + 原本名字
+    final_filename 是 Clash 导入后看到的配置名 = [CONV] + 原本名字
     （原本名字从订阅 URL 自动推导，不可配置）
     """
     # 计算最终文件名（即使 fetch 失败也要返回，方便日志）
     original_name = derive_name_from_url(subscription_url)
     final_filename = make_filename(original_name)
 
-    fetch = fetch_subscription(subscription_url, network_mode, custom_proxy)
+    fetch = fetch_subscription(subscription_url)
     if not fetch.success:
         return (
             fetch,

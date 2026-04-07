@@ -1,20 +1,23 @@
 # subgen
 
 > Portable, folder-based interactive wrapper for [subconverter](https://github.com/MetaCubeX/subconverter).
-> Clone-and-run, no installation, no system services, no domestic mirrors.
+> Clone-and-run. No installation, no system services, no domestic mirrors, no background daemons.
 >
 > [简体中文](#中文说明)
 
+---
+
 ## What is this
 
-`subgen` is a CLI tool that wraps the local `subconverter` HTTP service to:
+`subgen` is a small CLI tool that wraps a local `subconverter` HTTP service to:
 
-- Fetch your airport (机场) subscription with a chosen network mode (direct or via proxy)
-- Convert it to a Clash / Clash.Meta YAML using preset rule packages (ACL4SSR variants)
-- Tag the converted output with `[SG] ` prefix so you can distinguish it in your Clash client
-- Persist your last choice as the default for next run
+- Fetch your airport (机场) subscription directly
+- Convert it into a Clash / Clash.Meta YAML using preset rule packages (ACL4SSR variants)
+- Tag the converted profile with a `[CONV]` prefix so you can tell at a glance which profile in your Clash client came from subgen vs. the original subscription
 
-Everything lives in the cloned folder. Nothing touches `~/.config/`, `~/.local/`, `%APPDATA%`, etc.
+Everything lives inside the cloned folder. Nothing is written to `~/.config/`, `~/.local/`, `%APPDATA%`, or any system-wide path.
+
+`subconverter` runs in **ephemeral mode**: subgen spawns it as a child process only for the duration of a single command, then stops it automatically on exit. There is no background daemon and no PID file to manage.
 
 ## Quick start
 
@@ -23,7 +26,8 @@ Everything lives in the cloned folder. Nothing touches `~/.config/`, `~/.local/`
 ```bash
 git clone https://github.com/Rannk2085/subgen.git
 cd subgen
-./subgen
+./subgen install   # first time only: download subconverter binary
+./subgen           # launch the interactive wizard
 ```
 
 ### Windows
@@ -31,50 +35,111 @@ cd subgen
 ```cmd
 git clone https://github.com/Rannk2085/subgen.git
 cd subgen
+subgen.bat install
 subgen.bat
 ```
-
-That's it. The first run will:
-
-1. Detect your OS / arch
-2. Download `subconverter` binary into `data/bin/subconverter/`
-3. Start it as a background process (PID stored in `data/run/`)
-4. Drop you into the interactive wizard
 
 ## Requirements
 
 - **Python 3.11+** (uses stdlib `tomllib`, no third-party packages)
 - Linux / macOS / Windows
-- `git` (for cloning + updating via `git pull`)
+- `git` (for cloning and updating via `git pull`)
 
 If `python3` isn't installed:
+
 - Ubuntu/Debian: `sudo apt install python3`
 - Windows: `winget install Python.Python.3.12`
 - macOS: `brew install python3`
 
 ## Commands
 
-```bash
-./subgen                       # Interactive wizard (default)
-./subgen gen <URL>             # CLI mode, use given URL
-./subgen status                # Check subconverter background service
-./subgen start                 # Start subconverter
-./subgen stop                  # Stop subconverter
-./subgen restart               # Restart
-./subgen install               # Download/reinstall subconverter binary
-./subgen install --force       # Force re-download
-./subgen doctor                # Diagnose environment
-./subgen version
-./subgen help
 ```
+./subgen                       # Interactive wizard (most common)
+./subgen gen <URL>             # CLI mode, skip the URL prompt
+./subgen install               # Download subconverter (first run)
+./subgen install --force       # Force reinstall
+./subgen clean                 # Clear data/cache and data/logs
+./subgen doctor                # Diagnose environment
+./subgen version               # Print version
+./subgen help                  # Show help
+```
+
+> Note: there is **no** `status` / `start` / `stop` / `restart` command. subgen will spawn `subconverter` when a command needs it and terminate it automatically when the command finishes.
+
+## Networking
+
+subgen always fetches subscriptions **directly**. It does **not** read `HTTP_PROXY` / `HTTPS_PROXY` environment variables at runtime.
+
+If your subscription requires a proxy (e.g. an overseas-only endpoint), use one of:
+
+1. **Clash Party TUN mode** - turn on the virtual NIC in Clash Party so that all TCP traffic on the machine (including subgen's) gets captured and routed through Clash.
+2. **proxychains4** - wrap the launcher:
+
+   ```bash
+   proxychains4 ./subgen
+   ```
+
+If the subscription endpoint requires a specific region IP, switch to a node of the corresponding region in Clash Party **before** running subgen.
+
+> `./subgen install` is the one exception: when downloading the `subconverter` binary from GitHub, it *does* honor `HTTPS_PROXY` because GitHub may be slow/blocked. Runtime subscription fetches are always direct.
+
+## The 4-step wizard
+
+When you run `./subgen` you get:
+
+```
+[1/4] Subscription URL
+[2/4] Current network status   (informational only, no choice to make)
+[3/4] Rule preset              (default: Full, press Enter to accept)
+[4/4] Target client            (default: clashmeta, press Enter to accept)
+       ↓
+       Confirm → Generate
+```
+
+Step 2 just shows you what subgen sees about the current network (direct reachability, detected egress, etc.). There is no mode picker - subgen always goes direct, so your job is to make the network itself right (via Clash TUN / proxychains / region switch).
+
+## Rule presets
+
+Step 3 picks an ACL4SSR variant. Each variant defines a different set of proxy groups + rules in the generated YAML.
+
+| ID | 中文名 | Groups | Rules |
+|---|---|---|---|
+| `full` ⭐ | 完整版 | 19 | ~10000 |
+| `mini` | 精简版 | 5 | ~4000 |
+| `full_adblock` | 完整版 + 去广告 | 19 | ~12000 |
+| `full_noauto` | 完整版无自动测速 | 18 | ~10000 |
+| `noapple` | 无 Apple 分流 | 18 | ~9500 |
+| `noauto_nofakeip` | 无自动测速无 FakeIP | 18 | ~10000 |
+| `mini_fallback` | 精简版 Fallback | 5 | ~4000 |
+| `withgfw` | GFW List | 6 | ~8000 |
+
+Press Enter on step 3 to accept `full`.
+
+## Naming convention
+
+Every Clash config produced by subgen gets a `[CONV]` prefix when imported into your Clash client:
+
+```
+Original subscription:  https://link01.nobodys.uk/api/v1/...
+Imported profile name:  [CONV] link01
+```
+
+This lets you distinguish **"raw subscription"** from **"subgen-converted"** in one glance.
+
+Implementation detail: the prefix is set via subconverter's `&filename=` parameter, which subconverter writes into the HTTP `Content-Disposition` response header. subgen does **not** modify any node's `name:` field - individual proxy node names are preserved exactly as they come from the upstream subscription.
+
+The `[CONV]` prefix is hardcoded and not configurable.
 
 ## Folder layout
 
 ```
-subgen/                      ← git clone root
-├── subgen                   ← Linux/macOS launcher (bash)
-├── subgen.bat               ← Windows launcher
-├── src/                     ← Python source (committed)
+subgen/                          ← git clone root
+├── README.md
+├── LICENSE
+├── .gitignore
+├── subgen                       ← Linux / macOS launcher (bash)
+├── subgen.bat                   ← Windows launcher
+├── src/                         ← Python source (committed)
 │   ├── main.py
 │   ├── cli.py
 │   ├── interactive.py
@@ -85,50 +150,18 @@ subgen/                      ← git clone root
 │   ├── process.py
 │   ├── downloader.py
 │   └── presets_data.py
-├── data/                    ← runtime data (.gitignored)
-│   ├── bin/subconverter/    ← downloaded binary
-│   ├── config.toml          ← global config
-│   ├── state.toml           ← last choice memory
-│   ├── presets/             ← named presets (TOML)
-│   ├── cache/               ← downloaded ACL4SSR rules
-│   ├── logs/                ← subconverter + subgen logs
-│   └── run/                 ← PID file
-└── README.md
+└── data/                        ← runtime data (gitignored)
+    ├── bin/subconverter/        ← downloaded binary
+    ├── config.toml              ← global config
+    ├── presets/                 ← named presets (TOML)
+    ├── cache/                   ← remote resource cache
+    └── logs/                    ← subconverter + subgen logs
 ```
 
-## Network modes
+Things **not** in this tree (by design):
 
-When you run the wizard, step 2 asks how to fetch the subscription URL:
-
-| Mode | What it does | When to use |
-|---|---|---|
-| **DIRECT** | curl-equivalent direct connection (no proxy) | Your machine has the right outgoing IP for this airport |
-| **PROXY** | Routes through `http://127.0.0.1:7890` (Clash Party default) | Subscription is overseas-only |
-| **CUSTOM** | Routes through user-supplied proxy URL | Special setups |
-
-`subgen` does **not** modify your system proxy. It only **detects** the current state and **suggests** which mode to use, with notes for each. You're responsible for switching modes in your Clash client / system if needed.
-
-## Rule presets
-
-Step 3 lets you choose an ACL4SSR variant. Each variant defines a different set of proxy groups + rules in the generated YAML:
-
-| Preset | Groups | Rules | Notes |
-|---|---|---|---|
-| **Full** ⭐ | 19 | ~10000 | Full coverage, recommended |
-| Mini | 5 | ~4000 | Minimal, fast startup |
-| Full + AdblockPlus | 19 | ~12000 | Aggressive ad blocking |
-| Full NoAuto | 18 | ~10000 | No url-test (manual select only) |
-| NoApple | 18 | ~9500 | Apple services go DIRECT |
-| NoAuto NoFakeIP | 18 | ~10000 | For special network setups |
-| Mini Fallback | 5 | ~4000 | fallback instead of url-test |
-| WithGFW | 6 | ~8000 | GFW List based |
-| Custom | - | - | Manually input ini URL |
-
-## Naming convention
-
-The converted subscription is named with format `[SG] <derived-name>`. For example, fetching `https://link01.nobodys.uk/...` produces a config named `[SG] link01` when imported into Clash for Windows / Mihomo Party.
-
-The `[SG]` prefix is hardcoded (= SubGen) and not configurable. It exists only to distinguish "this profile was converted by subgen" from any original profile.
+- **No `data/state.toml`** - subgen does not remember the last run's choices.
+- **No `data/run/`** - no PID file, because subconverter is ephemeral.
 
 ## Updating
 
@@ -137,26 +170,31 @@ cd subgen
 git pull
 ```
 
-That's the entire update mechanism. No `self-update` command, no binary replacement.
+That's the whole update mechanism. There is no `self-update` command.
 
-To update the bundled subconverter binary:
+To refresh the bundled `subconverter` binary:
+
 ```bash
 ./subgen install --force
 ```
 
-To update ACL4SSR rules: they're fetched fresh on every conversion (subconverter handles this).
+ACL4SSR rules are fetched fresh on every conversion by `subconverter` itself, so they are always up to date.
 
-## Why no mirrors / no installer / no system service
+## Troubleshooting
 
-The user requested a strict portable design:
+Run the built-in diagnostic:
 
-- **No XDG / AppData paths**: everything in `data/` inside the cloned folder
-- **No mirrors**: connect to GitHub directly. If you need a proxy, use your existing one (HTTPS_PROXY env or the PROXY mode)
-- **No system service**: subconverter runs as a regular detached child process; PID file in `data/run/`
-- **No installer**: `git clone && ./subgen` is the entire install
-- **No self-update**: `git pull`
+```bash
+./subgen doctor
+```
 
-This makes subgen identical across all your machines: clone, run, done.
+It checks Python version, data directory, subconverter binary, and basic network reachability.
+
+To wipe caches and logs:
+
+```bash
+./subgen clean
+```
 
 ## License
 
@@ -171,21 +209,24 @@ MIT. See [LICENSE](LICENSE).
 `subgen` 是一个**纯文件夹形态、零安装、零系统侵入**的 [subconverter](https://github.com/MetaCubeX/subconverter) 交互式包装工具。
 
 核心功能：
-1. 用你选的网络模式（直连 / 代理）拉取机场订阅
-2. 调本地 `subconverter` 套用预设规则包（ACL4SSR 系列）转换
-3. 自动给转换后的配置加 `[SG] ` 前缀，方便在 Clash 中区分
-4. 记忆上次选择，下次回车走默认
 
-所有数据（配置、状态、缓存、日志、subconverter 二进制）都在 clone 的文件夹内，**完全不写系统目录**。
+1. 直连拉取机场订阅
+2. 调本地 `subconverter` 套用 ACL4SSR 规则包转换成 Clash / Clash.Meta 配置
+3. 自动给转换后的配置加 `[CONV]` 前缀，让你在 Clash 客户端里一眼区分「原始订阅」vs「subgen 转换的」
 
-## 三步上手
+所有数据（配置、缓存、日志、subconverter 二进制）都在 clone 出来的文件夹里，**完全不写系统目录**。
+
+`subconverter` 用 **ephemeral（短生命周期）** 模式跑：subgen 启动时拉起子进程，命令结束后自动停掉。没有后台常驻进程，也没有 PID 文件。
+
+## 快速上手
 
 ### Linux / macOS
 
 ```bash
 git clone https://github.com/Rannk2085/subgen.git
 cd subgen
-./subgen
+./subgen install   # 首次：下载 subconverter 二进制
+./subgen           # 进入交互式向导
 ```
 
 ### Windows
@@ -193,14 +234,9 @@ cd subgen
 ```cmd
 git clone https://github.com/Rannk2085/subgen.git
 cd subgen
+subgen.bat install
 subgen.bat
 ```
-
-第一次跑会自动：
-1. 检测系统/架构
-2. 从 GitHub 下载 subconverter 二进制到 `data/bin/`
-3. 后台启动 subconverter 子进程
-4. 进入交互式向导
 
 ## 系统要求
 
@@ -208,40 +244,117 @@ subgen.bat
 - Linux / macOS / Windows 都行
 - `git`（用于 clone 和更新 `git pull`）
 
-没装 Python？
-- Ubuntu/Debian: `sudo apt install python3`
-- Windows: `winget install Python.Python.3.12`
-- macOS: `brew install python3`
-
 ## 命令
 
-```bash
-./subgen                   # 交互式向导（最常用）
-./subgen gen <URL>         # 命令行模式
-./subgen status            # 看 subconverter 状态
-./subgen start | stop      # 启停 subconverter
-./subgen install           # 下载/重装 subconverter 二进制
-./subgen doctor            # 诊断环境
+```
+./subgen                       交互式向导（最常用）
+./subgen gen <URL>             命令行模式，跳过 URL 输入
+./subgen install               下载 subconverter 二进制（首次使用）
+./subgen install --force       强制重装
+./subgen clean                 清空 cache 和 logs
+./subgen doctor                诊断当前环境
+./subgen version               显示版本
+./subgen help                  显示帮助
 ```
 
-## 设计原则
+> 注意：**没有** `status` / `start` / `stop` / `restart`。subgen 跑命令时自动拉起 `subconverter`，命令结束后自动停掉，用户不需要手动管理。
 
-1. **不装系统服务**：subconverter 作为后台子进程，PID 在 `data/run/`
-2. **不用国内镜像**：如果你需要代理，用 PROXY 模式或 `HTTPS_PROXY` 环境变量
-3. **无安装脚本**：git clone 即装好
-4. **无 self-update**：`git pull` 就是更新
-5. **跨设备一致**：在任何机器上 clone 都是同样的体验
+## 网络策略
+
+subgen **始终直连**拉订阅，**不读** `HTTP_PROXY` / `HTTPS_PROXY` 环境变量。
+
+如需走代理，二选一：
+
+1. **Clash Party TUN 模式**：在 Clash Party 里启用 TUN（虚拟网卡），整机的 TCP 流量（包括 subgen）都会被 Clash Party 接管。
+2. **proxychains4**：用 proxychains 包装启动
+
+   ```bash
+   proxychains4 ./subgen
+   ```
+
+如果订阅域名要求特定地区 IP，**先**在 Clash Party 切对应地区节点，再跑 subgen。
+
+> 例外：`./subgen install` 下载 subconverter 时会读 `HTTPS_PROXY`，因为 GitHub 可能慢。但运行时拉订阅永远直连。
+
+## 4 步向导
+
+跑 `./subgen` 会得到：
+
+```
+[1/4] 订阅 URL
+[2/4] 当前网络状态   （只是信息展示，无需选择）
+[3/4] 规则套餐       （默认 Full，回车直接走默认）
+[4/4] 目标客户端     （默认 clashmeta，回车直接走默认）
+       ↓
+       确认 → 生成
+```
+
+第 2 步只是展示当前网络情况（直连可达性、出口等），没有模式选择——subgen 固定直连，网络本身的问题请用 Clash TUN / proxychains / 切地区节点解决。
+
+## 8 个 ACL4SSR 套餐
+
+第 3 步选 ACL4SSR 变体，每个变体定义一套不同的策略组 + 规则。
+
+| ID | 中文名 | 策略组数 | 规则数 |
+|---|---|---|---|
+| `full` ⭐ | 完整版 | 19 | ~10000 |
+| `mini` | 精简版 | 5 | ~4000 |
+| `full_adblock` | 完整版 + 去广告 | 19 | ~12000 |
+| `full_noauto` | 完整版无自动测速 | 18 | ~10000 |
+| `noapple` | 无 Apple 分流 | 18 | ~9500 |
+| `noauto_nofakeip` | 无自动测速无 FakeIP | 18 | ~10000 |
+| `mini_fallback` | 精简版 Fallback | 5 | ~4000 |
+| `withgfw` | GFW List | 6 | ~8000 |
+
+第 3 步直接回车 = 选 `full`。
 
 ## 命名约定
 
-转换后的配置会自动带 `[SG] ` 前缀：
+每次 subgen 转换出来的 Clash 配置导入到客户端时，名称会自动加 `[CONV]` 前缀：
 
 ```
-原始订阅:   https://link01.nobodys.uk/api/...
-导入 Clash: [SG] link01
+原始订阅:   https://link01.nobodys.uk/api/v1/...
+导入后名称: [CONV] link01
 ```
 
-`[SG]` 是硬编码（SubGen 缩写），不可配置。仅用于区分「这是 subgen 转换出来的配置」而已。
+这样可以一眼区分「原始订阅」vs「subgen 转换过的」。
+
+实现方式：通过 subconverter 的 `&filename=` 参数，让 subconverter 把它写进 HTTP 响应头 `Content-Disposition`。subgen **不修改任何节点的 `name:` 字段**，节点名保持原样。
+
+`[CONV]` 前缀是硬编码的，不可配置。
+
+## 目录结构
+
+```
+subgen/                          ← git clone 根
+├── README.md
+├── LICENSE
+├── .gitignore
+├── subgen                       ← Linux / macOS 启动脚本
+├── subgen.bat                   ← Windows 启动脚本
+├── src/                         ← Python 源码（提交到 git）
+│   ├── main.py
+│   ├── cli.py
+│   ├── interactive.py
+│   ├── env.py
+│   ├── storage.py
+│   ├── network.py
+│   ├── subconv.py
+│   ├── process.py
+│   ├── downloader.py
+│   └── presets_data.py
+└── data/                        ← 运行时数据（.gitignore）
+    ├── bin/subconverter/        ← 下载下来的二进制
+    ├── config.toml              ← 全局配置
+    ├── presets/                 ← 命名预设（TOML）
+    ├── cache/                   ← 远程资源缓存
+    └── logs/                    ← subconverter + subgen 日志
+```
+
+**不存在**的东西（故意的设计）：
+
+- **没有 `data/state.toml`** —— subgen 不记忆上次的选择。
+- **没有 `data/run/`** —— ephemeral 模式不需要 PID 文件。
 
 ## 更新
 
@@ -250,7 +363,22 @@ cd subgen
 git pull
 ```
 
-就这一条命令。
+就这一条。没有 `self-update` 命令。
+
+要刷新打包的 `subconverter` 二进制：
+
+```bash
+./subgen install --force
+```
+
+ACL4SSR 规则由 `subconverter` 每次转换时现拉，总是最新的。
+
+## 诊断与清理
+
+```bash
+./subgen doctor   # 检查 Python 版本、数据目录、二进制、网络
+./subgen clean    # 清空 cache 和 logs
+```
 
 ## License
 
