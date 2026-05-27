@@ -13,7 +13,7 @@
 - 前缀 [CONV] 硬编码，不可配置
 - 原名优先级: 1) HTTP Content-Disposition filename
               2) URL hostname 推导（兜底）
-- 最终: "[CONV] 机场原名"
+- 最终: "[CONV] 机场原名.yaml"
 
 网络策略：
 - subgen 始终直连，不读 HTTP_PROXY 环境变量
@@ -99,16 +99,35 @@ def derive_name_from_url(url: str) -> str:
         return "subscription"
 
 
+def _ensure_yaml_suffix(name: str) -> str:
+    """
+    统一把导入名修正为 .yaml 后缀：
+    - 已经是 .yaml → 保持
+    - 是 .yml     → 转成 .yaml
+    - 其他情况     → 追加 .yaml
+    """
+    trimmed = (name or "").strip()
+    if not trimmed:
+        return "subscription.yaml"
+
+    lower = trimmed.lower()
+    if lower.endswith(".yaml"):
+        return trimmed
+    if lower.endswith(".yml"):
+        return trimmed[:-4] + ".yaml"
+    return trimmed + ".yaml"
+
+
 def make_filename(original_name: str) -> str:
     """
-    把原始名字 + 标识前缀 = Clash 导入后看到的配置名
-    例如: link01 → [CONV] link01
+    把原始名字 + 标识前缀 + .yaml 后缀 = Clash 导入后看到的配置名
+    例如: link01 → [CONV] link01.yaml
     幂等：已经有前缀的不重复加。
     """
     name = (original_name or "subscription").strip()
-    if name.startswith(NAME_PREFIX):
-        return name
-    return f"{NAME_PREFIX} {name}"
+    if not name.startswith(NAME_PREFIX):
+        name = f"{NAME_PREFIX} {name}"
+    return _ensure_yaml_suffix(name)
 
 
 # ============================================================
@@ -410,7 +429,7 @@ def _count_groups(yaml_text: str) -> int:
 
 def compute_filename(fetch: FetchResult, subscription_url: str) -> str:
     """
-    根据拉取结果计算最终的导入后名字（[CONV] + 原名）
+    根据拉取结果计算最终的导入后名字（[CONV] + 原名 + .yaml）
     优先用机场 Content-Disposition 给的名字，兜底用 URL hostname 推导
     """
     if fetch.success and fetch.upstream_filename:

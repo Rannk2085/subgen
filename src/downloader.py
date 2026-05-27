@@ -79,6 +79,28 @@ def fetch_latest_release_info(proxy_url: str | None = None) -> dict | None:
         return None
 
 
+def can_access_github_direct(timeout: float = 6.0) -> bool:
+    """
+    检测当前网络是否可访问 GitHub API（强制直连，不读 HTTP(S)_PROXY）。
+    用于 install 阶段决定是否提示用户配置本地代理。
+    注意：若用户开启了 TUN/系统代理，此检测也会判定为可达。
+    """
+    opener = _make_opener(None)
+    req = urllib.request.Request(
+        GITHUB_API,
+        headers={"User-Agent": "subgen/0.1", "Accept": "application/vnd.github+json"},
+        method="HEAD",
+    )
+    try:
+        with opener.open(req, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        # 只要收到了 HTTP 响应，就说明网络可达。
+        return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
 def download(proxy_url: str | None = None, force: bool = False) -> tuple[bool, str]:
     """
     下载并安装 subconverter 到 data/bin/subconverter/

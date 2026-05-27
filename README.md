@@ -13,7 +13,7 @@
 
 - Fetch your airport (机场) subscription directly
 - Convert it into a Clash / Clash.Meta YAML using preset rule packages (ACL4SSR variants)
-- Tag the converted profile with a `[CONV]` prefix so you can tell at a glance which profile in your Clash client came from subgen vs. the original subscription
+- Tag the converted profile with a `[CONV]` prefix and `.yaml` suffix so you can tell at a glance which profile in your Clash client came from subgen vs. the original subscription
 
 Everything lives inside the cloned folder. Nothing is written to `~/.config/`, `~/.local/`, `%APPDATA%`, or any system-wide path.
 
@@ -81,7 +81,7 @@ If your subscription requires a proxy (e.g. an overseas-only endpoint), use one 
 
 If the subscription endpoint requires a specific region IP, switch to a node of the corresponding region in Clash Party **before** running subgen.
 
-> `./subgen install` is the one exception: when downloading the `subconverter` binary from GitHub, it *does* honor `HTTPS_PROXY` because GitHub may be slow/blocked. Runtime subscription fetches are always direct.
+> `./subgen install` is the one exception: when downloading the `subconverter` binary from GitHub, it can honor `HTTPS_PROXY`. It first checks whether GitHub is already reachable on the current network (including TUN/system proxy scenarios), and only suggests setting `HTTPS_PROXY` if GitHub is unreachable. Runtime subscription fetches are always direct.
 
 ## The 4-step wizard
 
@@ -117,18 +117,18 @@ Press Enter on step 3 to accept `full`.
 
 ## Naming convention
 
-Every Clash config produced by subgen gets a `[CONV]` prefix when imported into your Clash client:
+Every Clash config produced by subgen gets a `[CONV]` prefix and `.yaml` suffix when imported into your Clash client:
 
 ```
 Original subscription:  https://link01.nobodys.uk/api/v1/...
-Imported profile name:  [CONV] link01
+Imported profile name:  [CONV] link01.yaml
 ```
 
 This lets you distinguish **"raw subscription"** from **"subgen-converted"** in one glance.
 
-Implementation detail: the prefix is set via subconverter's `&filename=` parameter, which subconverter writes into the HTTP `Content-Disposition` response header. subgen does **not** modify any node's `name:` field - individual proxy node names are preserved exactly as they come from the upstream subscription.
+Implementation detail: the name is set via subconverter's `&filename=` parameter, which subconverter writes into the HTTP `Content-Disposition` response header. subgen does **not** modify any node's `name:` field - individual proxy node names are preserved exactly as they come from the upstream subscription.
 
-The `[CONV]` prefix is hardcoded and not configurable.
+The `[CONV]` prefix and `.yaml` suffix are hardcoded and not configurable.
 
 ## Folder layout
 
@@ -212,7 +212,7 @@ MIT. See [LICENSE](LICENSE).
 
 1. 直连拉取机场订阅
 2. 调本地 `subconverter` 套用 ACL4SSR 规则包转换成 Clash / Clash.Meta 配置
-3. 自动给转换后的配置加 `[CONV]` 前缀，让你在 Clash 客户端里一眼区分「原始订阅」vs「subgen 转换的」
+3. 自动给转换后的配置加 `[CONV]` 前缀和 `.yaml` 后缀，让你在 Clash 客户端里一眼区分「原始订阅」vs「subgen 转换的」
 
 所有数据（配置、缓存、日志、subconverter 二进制）都在 clone 出来的文件夹里，**完全不写系统目录**。
 
@@ -274,7 +274,7 @@ subgen **始终直连**拉订阅，**不读** `HTTP_PROXY` / `HTTPS_PROXY` 环�
 
 如果订阅域名要求特定地区 IP，**先**在 Clash Party 切对应地区节点，再跑 subgen。
 
-> 例外：`./subgen install` 下载 subconverter 时会读 `HTTPS_PROXY`，因为 GitHub 可能慢。但运行时拉订阅永远直连。
+> 例外：`./subgen install` 下载 subconverter 时可以读 `HTTPS_PROXY`。它会先检测当前网络是否可达 GitHub（含 TUN/系统代理场景），只有不可达时才提示你设置 `HTTPS_PROXY`。运行时拉订阅永远直连。
 
 ## 4 步向导
 
@@ -310,18 +310,18 @@ subgen **始终直连**拉订阅，**不读** `HTTP_PROXY` / `HTTPS_PROXY` 环�
 
 ## 命名约定
 
-每次 subgen 转换出来的 Clash 配置导入到客户端时，名称会自动加 `[CONV]` 前缀：
+每次 subgen 转换出来的 Clash 配置导入到客户端时，名称会自动加 `[CONV]` 前缀和 `.yaml` 后缀：
 
 ```
 原始订阅:   https://link01.nobodys.uk/api/v1/...
-导入后名称: [CONV] link01
+导入后名称: [CONV] link01.yaml
 ```
 
 这样可以一眼区分「原始订阅」vs「subgen 转换过的」。
 
 实现方式：通过 subconverter 的 `&filename=` 参数，让 subconverter 把它写进 HTTP 响应头 `Content-Disposition`。subgen **不修改任何节点的 `name:` 字段**，节点名保持原样。
 
-`[CONV]` 前缀是硬编码的，不可配置。
+`[CONV]` 前缀和 `.yaml` 后缀是硬编码的，不可配置。
 
 ## 目录结构
 

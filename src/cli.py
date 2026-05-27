@@ -54,6 +54,17 @@ def cmd_install(force: bool = False) -> int:
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     local_installed = downloader.is_installed()
     local_version = _read_local_subconverter_version() if local_installed else None
+    github_direct_ok: bool | None = None
+
+    # 未显式设置 HTTPS_PROXY 时，先判断当前网络是否已经可访问 GitHub
+    # （含 Clash TUN / 系统代理场景）。
+    if proxy is None:
+        print(C.info("检测当前网络是否可访问 GitHub..."))
+        github_direct_ok = downloader.can_access_github_direct()
+        if github_direct_ok:
+            print(C.ok("  GitHub 可达（无需额外设置 HTTPS_PROXY）"))
+        else:
+            print(C.warn("  GitHub 当前不可达"))
 
     # 查 GitHub 最新版本（即使是已安装也要查）
     print(C.info("查询 GitHub MetaCubeX/subconverter 最新版本..."))
@@ -61,11 +72,13 @@ def cmd_install(force: bool = False) -> int:
     if rel_info is None:
         latest_tag = None
         print(C.warn("  无法获取最新版本（GitHub 不可达）"))
-        if proxy is None:
+        if proxy is None and github_direct_ok is False:
             print(C.dim("  提示: 设置 HTTPS_PROXY=http://127.0.0.1:7890 后重试"))
     else:
         latest_tag = rel_info.get("tag_name", "?")
         print(C.dim(f"  GitHub 最新: {latest_tag}"))
+        if proxy is None:
+            github_direct_ok = True
 
     if local_version:
         print(C.dim(f"  本地版本:   {local_version}"))
@@ -86,7 +99,7 @@ def cmd_install(force: bool = False) -> int:
     # 需要下载（首次或 force）
     print()
     print(C.info("准备下载 subconverter..."))
-    if proxy is None:
+    if proxy is None and github_direct_ok is False:
         print(C.warn("如果 GitHub 直连超慢，可设置环境变量走代理后再跑:"))
         print(C.dim("  HTTPS_PROXY=http://127.0.0.1:7890 ./subgen install"))
     print()
